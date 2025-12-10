@@ -1,7 +1,7 @@
 # 🎨 Tapnow Studio
 
 [![AI-Native](https://img.shields.io/badge/Code-AI_Generated-f9a8d4.svg)](https://deepmind.google/technologies/gemini/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Single File](https://img.shields.io/badge/Build-Single__HTML-orange.svg)]()
 
 > 🤖 **AI-Native Project 声明**
@@ -135,12 +135,17 @@ Tapnow Studio 展示了现代前端技术在无构建工具（No-Build）环境�
 * 使用即梦、Midjourney 等服务时，请遵守相应服务商的使用条款。
 * 用户需自行管理 API Key，本项目不会上传任何 Key 到云端。
 
-## 📄 开源协议 (License)
+## 📄 许可证 (License)
 
-[MIT License](LICENSE)
-* 请勿将本项目用于任何非法用途。
-* 使用即梦、Midjourney 等服务时，请遵守相应服务商的使用条款。
-* 用户需自行管理 API Key，本项目不会上传任何 Key 到云端。
+本项目采用 **GNU General Public License v3.0 (GPLv3)** 开源协议。
+
+这意味着：
+* ✅ 你可以免费使用、复制、修改和分发本项目。
+* ✅ 你可以将本项目用于商业用途。
+* ⚠️ **但是**，如果你修改了本项目并发布（分发），你**必须**开源你的修改代码，并同样使用 GPLv3 协议。
+* 🚫 你**不能**将本项目闭源后作为商业软件出售。
+
+查看完整协议：[LICENSE](./LICENSE)
 
 ## 📄 开源协议 (License)
 
