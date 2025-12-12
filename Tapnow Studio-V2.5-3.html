@@ -37,6 +37,53 @@
     <div id="root"></div>
 
     <script type="text/babel" data-presets="env,react">
+        // 全局屏蔽滚轮事件相关的控制台错误（在 React 渲染之前设置）
+        (function() {
+            const originalError = console.error;
+            const originalWarn = console.warn;
+            const originalLog = console.log;
+            
+            const shouldFilter = (args) => {
+                // 检查所有参数，包括字符串、对象、错误等
+                for (let arg of args) {
+                    let msg = '';
+                    if (typeof arg === 'string') {
+                        msg = arg;
+                    } else if (arg && typeof arg === 'object') {
+                        // 检查错误对象的 message 属性
+                        if (arg.message) msg = arg.message;
+                        else if (arg.toString) msg = arg.toString();
+                        else msg = JSON.stringify(arg);
+                    } else if (arg != null) {
+                        msg = String(arg);
+                    }
+                    
+                    // 精确匹配 passive 事件监听器相关的错误
+                    if (msg.includes('Unable to preventDefault inside passive event listener') ||
+                        msg.includes('passive event listener invocation') ||
+                        (msg.includes('preventDefault') && msg.includes('passive'))) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
+            console.error = function(...args) {
+                if (shouldFilter(args)) return;
+                originalError.apply(console, args);
+            };
+            
+            console.warn = function(...args) {
+                if (shouldFilter(args)) return;
+                originalWarn.apply(console, args);
+            };
+            
+            console.log = function(...args) {
+                if (shouldFilter(args)) return;
+                originalLog.apply(console, args);
+            };
+        })();
+
         const { useState, useRef, useEffect, useCallback, useMemo, memo } = React;
 
         // --- ICON SYSTEM ADAPTER ---
@@ -1209,6 +1256,171 @@
                 setIsResizingChat(false);
             }, []);
 
+            // 屏蔽滚轮事件相关的控制台错误（passive 事件监听器错误）- 双重保护
+            useEffect(() => {
+                const originalError = console.error;
+                const originalWarn = console.warn;
+                
+                const shouldFilter = (args) => {
+                    const msg = args.map(arg => {
+                        if (typeof arg === 'string') return arg;
+                        if (arg && arg.toString) return arg.toString();
+                        return '';
+                    }).join(' ');
+                    return msg.includes('Unable to preventDefault') || 
+                           msg.includes('passive event listener') ||
+                           (msg.includes('preventDefault') && msg.includes('passive'));
+                };
+                
+                console.error = function(...args) {
+                    if (shouldFilter(args)) return;
+                    originalError.apply(console, args);
+                };
+                
+                console.warn = function(...args) {
+                    if (shouldFilter(args)) return;
+                    originalWarn.apply(console, args);
+                };
+                
+                return () => {
+                    console.error = originalError;
+                    console.warn = originalWarn;
+                };
+            }, []);
+
+            // 全局禁止 Ctrl+滚轮 缩放（捕获阶段，阻止浏览器缩放）；使用 try-catch 避免控制台报错
+            useEffect(() => {
+                const preventCtrlZoom = (e) => {
+                    if (!e.ctrlKey) return;
+                    try {
+                        if (e.cancelable) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                        }
+                    } catch (err) {
+                        // 静默处理 passive 事件监听器的错误
+                    }
+                };
+
+                const opts = { passive: false, capture: true };
+                window.addEventListener('wheel', preventCtrlZoom, opts);
+                document.addEventListener('wheel', preventCtrlZoom, opts);
+                window.addEventListener('mousewheel', preventCtrlZoom, opts);
+                document.addEventListener('mousewheel', preventCtrlZoom, opts);
+
+                return () => {
+                    window.removeEventListener('wheel', preventCtrlZoom, opts);
+                    document.removeEventListener('wheel', preventCtrlZoom, opts);
+                    window.removeEventListener('mousewheel', preventCtrlZoom, opts);
+                    document.removeEventListener('mousewheel', preventCtrlZoom, opts);
+                };
+            }, []);
+
+            // 使用原生事件监听器绑定 handleWheel，避免 React 合成事件的 passive 问题
+            useEffect(() => {
+                const canvasElement = canvasRef.current;
+                if (!canvasElement) return;
+
+                const wheelHandler = (e) => {
+                    // 如果按下了 Ctrl 键，直接阻止默认行为并不执行任何操作；使用 try-catch 避免控制台报错
+                    if (e.ctrlKey) {
+                        try {
+                            if (e.cancelable) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                            }
+                        } catch (err) {
+                            // 静默处理 passive 事件监听器的错误
+                        }
+                        return;
+                    }
+
+                    // 检查鼠标是否在视频输入或视频拆解节点内
+                    const target = e.target;
+                    let isInsideNode = false;
+                    let scrollableElement = null;
+                    
+                    // 向上查找父元素，检查是否在 video-input 或 video-analyze 节点内
+                    let current = target;
+                    while (current && current !== canvasElement) {
+                        if (current.classList) {
+                            // 检查当前元素或父元素是否包含节点容器类
+                            if (current.classList.contains('video-input-container') || 
+                                current.classList.contains('video-analyze-container')) {
+                                isInsideNode = true;
+                                // 在当前容器内查找可滚动的元素
+                                scrollableElement = current.querySelector('.overflow-y-auto, .custom-scrollbar, [class*="overflow-y"]');
+                                if (!scrollableElement) {
+                                    // 如果没找到，检查当前元素本身是否可滚动
+                                    const style = window.getComputedStyle(current);
+                                    if (style.overflowY === 'auto' || style.overflowY === 'scroll' || 
+                                        current.classList.contains('custom-scrollbar')) {
+                                        scrollableElement = current;
+                                    }
+                                }
+                                break;
+                            }
+                            // 使用 closest 方法查找最近的容器
+                            const container = current.closest('.video-input-container, .video-analyze-container');
+                            if (container) {
+                                isInsideNode = true;
+                                scrollableElement = container.querySelector('.overflow-y-auto, .custom-scrollbar, [class*="overflow-y"]');
+                                if (!scrollableElement) {
+                                    const style = window.getComputedStyle(container);
+                                    if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                                        scrollableElement = container;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        current = current.parentElement;
+                    }
+                    
+                    // 如果在节点内且找到可滚动元素，则滚动该元素而不是缩放画布
+                    if (isInsideNode && scrollableElement) {
+                        try {
+                            if (e.cancelable) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                            }
+                        } catch (err) {
+                            // 静默处理 passive 事件监听器的错误
+                        }
+                        const maxScroll = scrollableElement.scrollHeight - scrollableElement.clientHeight;
+                        const currentScroll = scrollableElement.scrollTop;
+                        const newScroll = Math.max(0, Math.min(maxScroll, currentScroll + e.deltaY));
+                        scrollableElement.scrollTop = newScroll;
+                        return;
+                    }
+                    
+                    // 否则正常缩放画布
+                    try {
+                        if (e.cancelable) {
+                            e.preventDefault();
+                        }
+                    } catch (err) {
+                        // 静默处理 passive 事件监听器的错误
+                    }
+                    const rect = canvasElement.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    const mouseY = e.clientY - rect.top;
+                    setView((prev) => {
+                        const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+                        let newZoom = Math.min(Math.max(prev.zoom * zoomFactor, 0.2), 3);
+                        const scale = newZoom / prev.zoom;
+                        return { zoom: newZoom, x: mouseX - (mouseX - prev.x) * scale, y: mouseY - (mouseY - prev.y) * scale };
+                    });
+                };
+
+                // 使用 { passive: false } 确保可以调用 preventDefault
+                canvasElement.addEventListener('wheel', wheelHandler, { passive: false });
+
+                return () => {
+                    canvasElement.removeEventListener('wheel', wheelHandler);
+                };
+            }, [view]);
+
             useEffect(() => {
                 if (isResizingChat) {
                     window.addEventListener('mousemove', handleChatResizeMove);
@@ -1231,6 +1443,19 @@
             }, [view]);
 
             const handleWheel = (e) => {
+                // 如果按下了 Ctrl 键，直接阻止默认行为并不执行任何操作；使用 try-catch 避免控制台报错
+                if (e.ctrlKey) {
+                    try {
+                        if (e.cancelable) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                        }
+                    } catch (err) {
+                        // 静默处理 passive 事件监听器的错误
+                    }
+                    return;
+                }
+
                 // 检查鼠标是否在视频输入或视频拆解节点内
                 const target = e.target;
                 let isInsideNode = false;
@@ -1275,8 +1500,14 @@
                 
                 // 如果在节点内且找到可滚动元素，则滚动该元素而不是缩放画布
                 if (isInsideNode && scrollableElement) {
-                    e.preventDefault();
-                    e.stopPropagation();
+                    try {
+                        if (e.cancelable) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                        }
+                    } catch (err) {
+                        // 静默处理 passive 事件监听器的错误
+                    }
                     const maxScroll = scrollableElement.scrollHeight - scrollableElement.clientHeight;
                     const currentScroll = scrollableElement.scrollTop;
                     const newScroll = Math.max(0, Math.min(maxScroll, currentScroll + e.deltaY));
@@ -1285,7 +1516,13 @@
                 }
                 
                 // 否则正常缩放画布
-                e.preventDefault();
+                try {
+                    if (e.cancelable) {
+                        e.preventDefault();
+                    }
+                } catch (err) {
+                    // 静默处理 passive 事件监听器的错误
+                }
                 const rect = e.currentTarget.getBoundingClientRect();
                 const mouseX = e.clientX - rect.left;
                 const mouseY = e.clientY - rect.top;
@@ -5565,7 +5802,7 @@
                 
                 const selectedNodes = currentNodes.filter(node => 
                     (currentSelectedId === node.id || (currentSelectedIds && currentSelectedIds.has(node.id))) && 
-                    (node.type === 'input-image' || node.type === 'video-input') && 
+                    (node.type === 'input-image' || node.type === 'video-input' || node.type === 'preview') && 
                     node.content
                 );
 
@@ -5590,7 +5827,22 @@
                         const blobUrl = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = blobUrl;
-                        const extension = isVideoUrl(url) ? '.mp4' : '.png';
+                        
+                        // 判断文件扩展名：对于预览窗口，根据previewType判断；对于其他节点，根据URL或节点类型判断
+                        let extension = '.png';
+                        if (node.type === 'preview') {
+                            // 预览窗口：根据previewType判断
+                            if (node.previewType === 'video') {
+                                extension = '.mp4';
+                            } else {
+                                extension = isVideoUrl(url) ? '.mp4' : '.png';
+                            }
+                        } else if (node.type === 'video-input') {
+                            extension = '.mp4';
+                        } else {
+                            extension = isVideoUrl(url) ? '.mp4' : '.png';
+                        }
+                        
                         const filename = `${node.id}${extension}`;
                         a.download = filename;
                         document.body.appendChild(a);
@@ -7311,9 +7563,27 @@
                 const { frame } = frameContextMenu;
                 if (!frame?.url) return;
                 setNodes(prev => {
+                    // 优先使用当前选中的预览节点
+                    const selectedId = selectedNodeIdRef.current;
+                    const selectedIds = selectedNodeIdsRef.current;
                     const previews = prev.filter(n => n.type === 'preview');
                     if (!previews.length) return prev;
-                    const targetId = previews[previews.length - 1].id;
+                    
+                    // 先查找选中的预览节点
+                    let targetId = null;
+                    if (selectedId) {
+                        const selectedPreview = previews.find(p => p.id === selectedId);
+                        if (selectedPreview) targetId = selectedPreview.id;
+                    }
+                    if (!targetId && selectedIds && selectedIds.size > 0) {
+                        const selectedPreview = previews.find(p => selectedIds.has(p.id));
+                        if (selectedPreview) targetId = selectedPreview.id;
+                    }
+                    // 如果没有选中预览节点，则默认使用最后一个预览窗口
+                    if (!targetId) {
+                        targetId = previews[previews.length - 1].id;
+                    }
+
                     return prev.map(n =>
                         n.id === targetId
                             ? { ...n, content: frame.url, previewType: 'image' }
@@ -8552,6 +8822,14 @@
                                                     handlePreviewRightClick(e, { url: previewUrl, type: node.previewType || (isVideoUrl(previewUrl) ? 'video' : 'image'), sourceNode: node });
                                                 }
                                             }}
+                                            onDoubleClick={(e) => {
+                                                e.stopPropagation();
+                                                e.preventDefault();
+                                                const previewUrl = node.content || (node.previewMjImages && node.previewMjImages[0]);
+                                                if (previewUrl) {
+                                                    setLightboxItem({ url: previewUrl, type: node.previewType || (isVideoUrl(previewUrl) ? 'video' : 'image') });
+                                                }
+                                            }}
                                         >
                                             {node.content || (node.previewMjImages && node.previewMjImages.length > 0) ? (
                                                 isVideoUrl(node.content) || node.previewType === 'video' ? (
@@ -8785,29 +9063,32 @@
                                                     {connectedImages.length}/10
                                                 </span>
                                              </div>
-                                             <div className="flex -space-x-2 overflow-x-auto pb-1 items-center custom-scrollbar pl-1">
+                                             <div className="flex -space-x-2 overflow-visible pb-1 items-center custom-scrollbar pl-1">
                                                 {connectedImages.map((imgSrc, idx) => (
                                                     <div
                                                         key={idx}
-                                                        className={`relative shrink-0 flex flex-col items-center gap-1 ${
+                                                        className={`relative shrink-0 flex flex-col items-center gap-0 ${
                                                             theme === 'dark' ? '' : ''
                                                         }`}
                                                     >
-                                                        <div
-                                                            className={`relative w-8 h-8 rounded-full border-2 thumb-stack-item cursor-pointer overflow-hidden ${
-                                                                theme === 'dark'
-                                                                    ? 'border-[#18181b] bg-zinc-800'
-                                                                    : 'border-white bg-zinc-200'
-                                                            }`}
-                                                            style={{ zIndex: 10 - idx }}
-                                                        >
-                                                            <img src={imgSrc} className="w-full h-full object-cover" />
+                                                        <div className="relative">
+                                                            <span
+                                                                className="absolute -top-1 -left-1 w-4 h-4 text-[9px] font-semibold rounded-full bg-zinc-700 text-white select-none flex items-center justify-center border border-white/70 shadow-sm leading-none pointer-events-none"
+                                                                style={{ zIndex: 30 }}
+                                                            >
+                                                                {idx + 1}
+                                                            </span>
+                                                            <div
+                                                                className={`relative w-8 h-8 rounded-full border-2 thumb-stack-item cursor-pointer overflow-hidden ${
+                                                                    theme === 'dark'
+                                                                        ? 'border-[#18181b] bg-zinc-800'
+                                                                        : 'border-white bg-zinc-200'
+                                                                }`}
+                                                                style={{ zIndex: 10 - idx }}
+                                                            >
+                                                                <img src={imgSrc} className="w-full h-full object-cover" />
+                                                            </div>
                                                         </div>
-                                                        <span className={`text-[8px] font-medium ${
-                                                            theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'
-                                                        }`}>
-                                                            参考图{idx + 1}
-                                                        </span>
                                                     </div>
                                                 ))}
                                              </div>
@@ -9761,7 +10042,7 @@
                         {/* Main Canvas Area */}
                         <div className="flex-1 relative overflow-hidden flex">
                              <div ref={canvasRef} id="canvas-bg" className="flex-1 h-full cursor-default relative"
-                                onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onClick={handleBackgroundClick} onDoubleClick={handleDoubleClick}
+                                onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onClick={handleBackgroundClick} onDoubleClick={handleDoubleClick}
                                 style={{ 
                                     backgroundImage: theme === 'dark' 
                                         ? 'radial-gradient(#27272a 1px, transparent 1px)' 
