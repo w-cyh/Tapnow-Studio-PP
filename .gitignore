@@ -1,7 +1,12 @@
 node_modules/
 dist/
 docs/
+backups/
 .waylog/
+.githooks/
+scripts/
+kanban.json
+codex.md
 *.7z
 !JimengAPI_For_Mac_Users_260117_v1.8.1.7z
 !JimengAPI_Release_Green_260117_v1.8.1.7z
@@ -10,6 +15,7 @@ docs/
 .DS_Store
 thumbs.db
 .gitignore
+localserver/__pycache__/
 Tapnow Studio-V*.html
 !Tapnow Studio-V3.7.34.html
 !Tapnow Studio-V3.8.0.html

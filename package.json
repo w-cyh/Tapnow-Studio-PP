@@ -1,11 +1,11 @@
 {
   "name": "tapnow-studio",
   "private": true,
-  "version": "3.8.0",
+  "version": "3.8.1-rc2",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node -e \"require('fs').copyFileSync('dist/index.html', 'Tapnow Studio-V' + require('./package.json').version + '.html')\"",
+    "build": "vite build && node -e \"require('fs').copyFileSync('dist/index.html', 'dist/Tapnow Studio-V' + require('./package.json').version + '.html')\"",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -29,4 +29,3 @@
     "vite-plugin-singlefile": "^2.0.1"
   }
 }
-
