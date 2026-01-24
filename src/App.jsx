@@ -2267,8 +2267,13 @@ const ImageCompareView = React.memo(({ img1, img2, theme = 'dark' }) => {
         };
     }, []);
 
-    const displayImg1 = img1;
-    const displayImg2 = img2 || img1;
+    const normalizeCompareImage = (value) => {
+        if (!value || typeof value !== 'string') return value;
+        if (value.startsWith('data:')) return normalizeDataUrl(value);
+        return value;
+    };
+    const displayImg1 = normalizeCompareImage(img1);
+    const displayImg2 = normalizeCompareImage(img2 || img1);
 
     if (!displayImg1) return (
         <div className={`w-full h-full flex flex-col items-center justify-center rounded-lg border border-dashed pointer-events-none ${isDark
@@ -3743,12 +3748,14 @@ function TapnowApp() {
                 const res = await fetch(`${baseUrl}/ping`, { method: 'GET' });
                 if (res.ok) {
                     const data = await res.json();
+                    const rawImagePath = data.image_save_path_raw ?? data.image_save_path ?? '';
+                    const rawVideoPath = data.video_save_path_raw ?? data.video_save_path ?? '';
                     setLocalCacheServerConnected(true);
                     setLocalServerConfig(prev => ({
                         ...prev,
                         savePath: normalizeLocalPath(data.save_path || prev.savePath || ''),
-                        imageSavePath: normalizeLocalPath(data.image_save_path || ''),
-                        videoSavePath: normalizeLocalPath(data.video_save_path || ''),
+                        imageSavePath: normalizeLocalPath(rawImagePath || ''),
+                        videoSavePath: normalizeLocalPath(rawVideoPath || ''),
                         convertPngToJpg: data.convert_png_to_jpg !== false,
                         jpgQuality: data.jpg_quality || prev.jpgQuality,
                         pilAvailable: data.pil_available || false
@@ -3884,6 +3891,19 @@ function TapnowApp() {
         const config = quality === 'ultra'
             ? { maxSize: 80, jpegQuality: 0.3 }
             : { maxSize: 150, jpegQuality: 0.6 };
+        let resolvedUrl = imageUrl;
+        if (!resolvedUrl) return null;
+        try {
+            if (LocalImageManager.isImageId(resolvedUrl)) {
+                resolvedUrl = await LocalImageManager.getImage(resolvedUrl);
+            }
+            if (resolvedUrl && resolvedUrl.startsWith('data:')) {
+                resolvedUrl = normalizeDataUrl(resolvedUrl);
+            }
+        } catch (e) {
+            return null;
+        }
+        if (!resolvedUrl) return null;
         return new Promise((resolve) => {
             try {
                 const img = new Image();
@@ -3904,7 +3924,7 @@ function TapnowApp() {
                     resolve(canvas.toDataURL('image/jpeg', config.jpegQuality));
                 };
                 img.onerror = () => resolve(null);
-                img.src = imageUrl;
+                img.src = resolvedUrl;
             } catch (e) {
                 resolve(null);
             }
@@ -4152,16 +4172,22 @@ function TapnowApp() {
             }
             const data = await res.json();
             const serverConfig = data?.config || {};
+            const rawImagePath = serverConfig.image_save_path_raw;
+            const rawVideoPath = serverConfig.video_save_path_raw;
             setLocalServerConfig(prev => ({
                 ...prev,
                 savePath: normalizeLocalPath(
                     serverConfig.save_path ?? normalizedPatch.save_path ?? prev.savePath ?? ''
                 ),
                 imageSavePath: normalizeLocalPath(
-                    serverConfig.image_save_path ?? normalizedPatch.image_save_path ?? prev.imageSavePath ?? ''
+                    rawImagePath !== undefined
+                        ? rawImagePath
+                        : (serverConfig.image_save_path ?? normalizedPatch.image_save_path ?? prev.imageSavePath ?? '')
                 ),
                 videoSavePath: normalizeLocalPath(
-                    serverConfig.video_save_path ?? normalizedPatch.video_save_path ?? prev.videoSavePath ?? ''
+                    rawVideoPath !== undefined
+                        ? rawVideoPath
+                        : (serverConfig.video_save_path ?? normalizedPatch.video_save_path ?? prev.videoSavePath ?? '')
                 ),
                 convertPngToJpg: (serverConfig.convert_png_to_jpg ?? normalizedPatch.convert_png_to_jpg) !== undefined
                     ? (serverConfig.convert_png_to_jpg ?? normalizedPatch.convert_png_to_jpg) !== false
@@ -4200,9 +4226,12 @@ function TapnowApp() {
     }, [showToast]);
 
     const getItemProxyPreference = useCallback((item) => {
-        const providerKey = item?.provider || item?.apiConfig?.provider || '';
+        const providerKey = String(item?.provider || item?.apiConfig?.provider || '').trim();
         if (!providerKey) return false;
-        return !!providers[providerKey]?.useProxy;
+        if (providers[providerKey]?.useProxy) return true;
+        const normalizedKey = providerKey.toLowerCase();
+        if (normalizedKey && providers[normalizedKey]?.useProxy) return true;
+        return false;
     }, [providers]);
 
     useEffect(() => {
@@ -4252,6 +4281,12 @@ function TapnowApp() {
         }));
     }, []);
 
+    const normalizeHistoryUrl = (value) => {
+        if (!value || typeof value !== 'string') return value;
+        if (value.startsWith('data:')) return normalizeDataUrl(value);
+        return value;
+    };
+
     const resolveHistoryUrl = useCallback((item, specificUrl = null) => {
         if (!item) return '';
         const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
@@ -4267,15 +4302,15 @@ function TapnowApp() {
                 const cached = item.localCacheMap[specificUrl];
                 if (!isCacheUrlMismatch(cached)) return cached;
             }
-            return specificUrl;
+            return normalizeHistoryUrl(specificUrl);
         }
         const cacheUrl = localCacheActive
             ? (item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null))
             : null;
         if (cacheUrl && isCacheUrlMismatch(cacheUrl)) {
-            return item.url || item.originalUrl || item.mjOriginalUrl || '';
+            return normalizeHistoryUrl(item.url || item.originalUrl || item.mjOriginalUrl || '');
         }
-        return cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
+        return normalizeHistoryUrl(cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
     }, [localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath]);
 
     const resolveHistoryPreviewUrl = useCallback((item, specificUrl = null) => {
@@ -4299,21 +4334,21 @@ function TapnowApp() {
                     return item.mjThumbnails[idx];
                 }
             }
-            return specificUrl;
+            return normalizeHistoryUrl(specificUrl);
         }
         const cacheUrl = localCacheActive
             ? (item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null))
             : null;
         if (performanceMode === 'off') {
             if (cacheUrl && isCacheUrlMismatch(cacheUrl)) {
-                return item.url || item.originalUrl || item.mjOriginalUrl || '';
+                return normalizeHistoryUrl(item.url || item.originalUrl || item.mjOriginalUrl || '');
             }
-            return cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
+            return normalizeHistoryUrl(cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
         }
         if (cacheUrl && isCacheUrlMismatch(cacheUrl)) {
-            return item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
+            return normalizeHistoryUrl(item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
         }
-        return cacheUrl || item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
+        return normalizeHistoryUrl(cacheUrl || item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
     }, [localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, performanceMode]);
 
     const rebuildHistoryThumbnail = useCallback(async (item, options = {}) => {
@@ -4535,9 +4570,10 @@ function TapnowApp() {
 
                 const firstCacheUrl = localCacheUrl || (Object.keys(cacheMap).length > 0 ? Object.values(cacheMap)[0] : null);
                 if (firstCacheUrl) {
+                    const canCheck = !String(firstCacheUrl).startsWith('data:') && !String(firstCacheUrl).startsWith('blob:');
                     const now = Date.now();
                     const lastCheck = localCacheCheckRef.current.get(item.id) || 0;
-                    if (now - lastCheck > 30000) {
+                    if (canCheck && now - lastCheck > 30000) {
                         localCacheCheckRef.current.set(item.id, now);
                         let cacheInvalid = false;
                         try {
@@ -5604,7 +5640,8 @@ function TapnowApp() {
                     content,
                     sourceUrl: url,
                     dedupeKey,
-                    scopedKey: item.scopedKey || ''
+                    scopedKey: item.scopedKey || '',
+                    type: isVideo ? 'video' : 'image'
                 });
             } catch (err) {
                 console.warn('[保存到本地] 读取资源失败:', err);
@@ -27751,7 +27788,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 {paramValues.length > 0 && (
                                                                                     <div className="space-y-1">
                                                                                         <div className="flex items-center gap-2">
-                                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>参数备注</div>
+                                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>参数显示名</div>
                                                                                             <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
                                                                                                 <input
                                                                                                     type="checkbox"
@@ -27759,8 +27796,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                     onChange={(e) => updateModelLibraryCustomParam(entry.id, param.id, { notesEnabled: e.target.checked })}
                                                                                                     disabled={!isEditing}
                                                                                                 />
-                                                                                                <span>启用备注</span>
+                                                                                                <span>启用重命名</span>
                                                                                             </label>
+                                                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>仅展示，不影响提交</span>
                                                                                         </div>
                                                                                         {notesEnabled && paramValues.map((value) => (
                                                                                             <div key={value} className="flex items-center gap-2">

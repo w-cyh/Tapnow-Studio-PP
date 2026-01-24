@@ -421,6 +421,8 @@ class TapnowHandler(BaseHTTPRequestHandler):
                 "save_path": config["save_path"],
                 "image_save_path": config["image_save_path"] or config["save_path"],
                 "video_save_path": config["video_save_path"] or config["save_path"],
+                "image_save_path_raw": config["image_save_path"],
+                "video_save_path_raw": config["video_save_path"],
                 "port": config["port"],
                 "pil_available": PIL_AVAILABLE,
                 "convert_png_to_jpg": config["convert_png_to_jpg"]
@@ -432,6 +434,8 @@ class TapnowHandler(BaseHTTPRequestHandler):
                 "save_path": config["save_path"],
                 "image_save_path": config["image_save_path"] or config["save_path"],
                 "video_save_path": config["video_save_path"] or config["save_path"],
+                "image_save_path_raw": config["image_save_path"],
+                "video_save_path_raw": config["video_save_path"],
                 "auto_create_dir": config["auto_create_dir"],
                 "allow_overwrite": config["allow_overwrite"],
                 "convert_png_to_jpg": config["convert_png_to_jpg"],
@@ -792,21 +796,28 @@ class TapnowHandler(BaseHTTPRequestHandler):
                 return
             
             results = []
-            if subfolder:
-                save_dir = safe_join(config["save_path"], subfolder)
-                if not save_dir:
-                    self.send_json_response({"success": False, "error": "非法子目录"}, 400)
-                    return
-            else:
-                save_dir = config["save_path"]
-            
-            if config["auto_create_dir"]:
-                ensure_dir(save_dir)
+            ensured_dirs = set()
             
             for file_info in files:
                 try:
                     filename = file_info.get('filename', f'file_{len(results)}.png')
                     content = file_info.get('content', '')
+                    file_type = file_info.get('type', '')
+                    base_dir = config["save_path"]
+                    if file_type == 'video' and config.get("video_save_path"):
+                        base_dir = config["video_save_path"]
+                    elif file_type == 'image' and config.get("image_save_path"):
+                        base_dir = config["image_save_path"]
+                    if subfolder:
+                        save_dir = safe_join(base_dir, subfolder)
+                        if not save_dir:
+                            self.send_json_response({"success": False, "error": "非法子目录"}, 400)
+                            return
+                    else:
+                        save_dir = base_dir
+                    if config["auto_create_dir"] and save_dir not in ensured_dirs:
+                        ensure_dir(save_dir)
+                        ensured_dirs.add(save_dir)
                     
                     filepath = os.path.join(save_dir, filename)
                     if not config["allow_overwrite"]:
@@ -897,6 +908,8 @@ class TapnowHandler(BaseHTTPRequestHandler):
                     "save_path": config["save_path"],
                     "image_save_path": config["image_save_path"] or config["save_path"],
                     "video_save_path": config["video_save_path"] or config["save_path"],
+                    "image_save_path_raw": config["image_save_path"],
+                    "video_save_path_raw": config["video_save_path"],
                     "auto_create_dir": config["auto_create_dir"],
                     "allow_overwrite": config["allow_overwrite"],
                     "convert_png_to_jpg": config["convert_png_to_jpg"],
@@ -963,6 +976,7 @@ class TapnowHandler(BaseHTTPRequestHandler):
                 return
             
             # 确定保存目录
+            base_root = config["save_path"]
             if custom_path:
                 # 使用用户自定义路径
                 cache_dir = os.path.expanduser(custom_path)
@@ -976,15 +990,29 @@ class TapnowHandler(BaseHTTPRequestHandler):
                 if not is_path_allowed(cache_dir):
                     self.send_json_response({"success": False, "error": "不允许保存到该路径"}, 403)
                     return
+                cache_dir_abs = os.path.abspath(cache_dir)
+                for candidate in [config.get("image_save_path", ""), config.get("video_save_path", ""), config["save_path"]]:
+                    if not candidate:
+                        continue
+                    candidate_abs = os.path.abspath(candidate)
+                    try:
+                        if os.path.commonpath([cache_dir_abs, candidate_abs]) == candidate_abs:
+                            base_root = candidate
+                            break
+                    except ValueError:
+                        continue
             elif file_type == 'video' and config["video_save_path"]:
                 # 视频使用视频保存路径
-                cache_dir = os.path.join(config["video_save_path"], category)
+                base_root = config["video_save_path"]
+                cache_dir = os.path.join(base_root, category)
             elif file_type == 'image' and config["image_save_path"]:
                 # 图片使用图片保存路径
-                cache_dir = os.path.join(config["image_save_path"], category)
+                base_root = config["image_save_path"]
+                cache_dir = os.path.join(base_root, category)
             else:
                 # 默认使用 .tapnow_cache 子目录
-                cache_dir = os.path.join(config["save_path"], '.tapnow_cache', category)
+                base_root = config["save_path"]
+                cache_dir = os.path.join(base_root, '.tapnow_cache', category)
             
             ensure_dir(cache_dir)
             
@@ -1010,17 +1038,21 @@ class TapnowHandler(BaseHTTPRequestHandler):
             # 返回可访问的URL
             # 处理跨磁盘的情况（Windows上不同盘符无法使用relpath）
             try:
-                rel_path = os.path.relpath(filepath, config["save_path"]).replace('\\', '/')
+                rel_path = os.path.relpath(filepath, base_root).replace('\\', '/')
             except ValueError:
                 # 跨磁盘时使用相对于cache_dir的路径
                 rel_path = os.path.relpath(filepath, cache_dir).replace('\\', '/')
                 # 添加category前缀
-                if file_type == 'video' and config["video_save_path"]:
-                    rel_path = f"history/{rel_path}"
-                elif file_type == 'image' and config["image_save_path"]:
-                    rel_path = f"history/{rel_path}"
-                else:
+                if base_root == config["save_path"]:
                     rel_path = f".tapnow_cache/{category}/{rel_path}"
+                else:
+                    rel_path = f"{category}/{rel_path}"
+            if rel_path.startswith('..'):
+                rel_path = os.path.relpath(filepath, cache_dir).replace('\\', '/')
+                if base_root == config["save_path"]:
+                    rel_path = f".tapnow_cache/{category}/{rel_path}"
+                else:
+                    rel_path = f"{category}/{rel_path}"
             local_url = f"http://127.0.0.1:{config['port']}/file/{rel_path}"
             
             log(f"缓存文件已保存: {filepath} ({len(file_data)} bytes)")
