@@ -3675,6 +3675,7 @@ function TapnowApp() {
     const [libraryPreviewModels, setLibraryPreviewModels] = useState(() => new Set());
     const [libraryPreviewEditing, setLibraryPreviewEditing] = useState(() => new Set());
     const [libraryPreviewDrafts, setLibraryPreviewDrafts] = useState(() => ({}));
+    const [libraryNotesCollapsed, setLibraryNotesCollapsed] = useState(() => ({}));
     const [historyOpen, setHistoryOpen] = useState(false);
     const [historyCachePanelOpen, setHistoryCachePanelOpen] = useState(false);
     const [historyQueuePanelOpen, setHistoryQueuePanelOpen] = useState(false);
@@ -3964,18 +3965,9 @@ function TapnowApp() {
                 throw new Error('Blob 已失效');
             }
         }
-        const candidates = [url];
-        const proxied = resolveCacheFetchUrl(url, useProxy);
-        if (proxied && proxied !== url) candidates.push(proxied);
-        let lastError;
-        for (const candidate of candidates) {
-            try {
-                return await fetchBlob(candidate);
-            } catch (e) {
-                lastError = e;
-            }
-        }
-        throw lastError || new Error('图片加载失败');
+        const targetUrl = useProxy ? resolveCacheFetchUrl(url, true) : url;
+        if (!targetUrl) throw new Error('Invalid URL');
+        return await fetchBlob(targetUrl);
     };
 
     // 获取 Base64 字符串（自动识别 Data URL 或 Blob URL 并转换）
@@ -4056,22 +4048,16 @@ function TapnowApp() {
         const useProxy = options.useProxy === true;
         if (!imageUrl) throw new Error('缓存拉取失败: 空链接');
         const isLocalData = imageUrl.startsWith('data:') || imageUrl.startsWith('blob:');
-        const candidates = [imageUrl];
-        if (!isLocalData) {
-            const proxied = resolveCacheFetchUrl(imageUrl, useProxy);
-            if (proxied && proxied !== imageUrl) candidates.push(proxied);
+        const resolvedUrl = (!isLocalData && useProxy)
+            ? resolveCacheFetchUrl(imageUrl, true)
+            : imageUrl;
+        try {
+            const blob = await getBlobFromUrl(resolvedUrl, { useProxy: false });
+            if (!blob || blob.size === 0) throw new Error('缓存拉取失败: 空文件');
+            return { blob, source: resolvedUrl };
+        } catch (err) {
+            throw err || new Error('缓存拉取失败');
         }
-        let lastError;
-        for (const candidate of candidates) {
-            try {
-                const blob = await getBlobFromUrl(candidate, { useProxy: false });
-                if (!blob || blob.size === 0) throw new Error('缓存拉取失败: 空文件');
-                return { blob, source: candidate };
-            } catch (err) {
-                lastError = err;
-            }
-        }
-        throw lastError || new Error('缓存拉取失败');
     }, [resolveCacheFetchUrl, getBlobFromUrl]);
 
     const saveImageToLocalCache = useCallback(async (itemId, imageUrl, category = 'history', options = {}) => {
@@ -4234,6 +4220,8 @@ function TapnowApp() {
     }, [localCacheActive, refreshLocalCache]);
 
     const getItemProxyPreference = useCallback((item) => {
+        if (typeof item?.useProxy === 'boolean') return item.useProxy;
+        if (typeof item?.apiConfig?.useProxy === 'boolean') return item.apiConfig.useProxy;
         const providerKey = String(item?.provider || item?.apiConfig?.provider || '').trim();
         if (!providerKey) return false;
         if (providers[providerKey]?.useProxy) return true;
@@ -5056,10 +5044,14 @@ function TapnowApp() {
                 type: entry.type || 'Chat',
                 apiType: entry.apiType || 'openai',
                 ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
+                ratioNotes: normalizeValueNotes(entry.ratioNotes),
+                ratioNotesEnabled: !!entry.ratioNotesEnabled,
                 resolutionLimits: Array.isArray(entry.resolutionLimits) ? entry.resolutionLimits : null,
                 resolutionNotes: normalizeValueNotes(entry.resolutionNotes),
                 resolutionNotesEnabled: !!entry.resolutionNotesEnabled,
                 durations: Array.isArray(entry.durations) ? entry.durations : null,
+                durationNotes: normalizeValueNotes(entry.durationNotes),
+                durationNotesEnabled: !!entry.durationNotesEnabled,
                 videoResolutions: Array.isArray(entry.videoResolutions) ? entry.videoResolutions : null,
                 videoResolutionNotes: normalizeValueNotes(entry.videoResolutionNotes),
                 videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
@@ -5086,10 +5078,14 @@ function TapnowApp() {
             type: resolvedLibrary?.type || config.type || 'Chat',
             apiType: resolvedLibrary?.apiType || config.apiType,
             ratioLimits: resolvedLibrary ? resolvedLibrary.ratioLimits : (config.ratioLimits || null),
+            ratioNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.ratioNotes) : normalizeValueNotes(config.ratioNotes),
+            ratioNotesEnabled: resolvedLibrary ? !!resolvedLibrary.ratioNotesEnabled : !!config.ratioNotesEnabled,
             resolutionLimits: resolvedLibrary ? resolvedLibrary.resolutionLimits : (config.resolutionLimits || null),
             resolutionNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.resolutionNotes) : normalizeValueNotes(config.resolutionNotes),
             resolutionNotesEnabled: resolvedLibrary ? !!resolvedLibrary.resolutionNotesEnabled : !!config.resolutionNotesEnabled,
             durations: resolvedLibrary ? resolvedLibrary.durations : (config.durations || null),
+            durationNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.durationNotes) : normalizeValueNotes(config.durationNotes),
+            durationNotesEnabled: resolvedLibrary ? !!resolvedLibrary.durationNotesEnabled : !!config.durationNotesEnabled,
             videoResolutions: resolvedLibrary ? resolvedLibrary.videoResolutions : (config.videoResolutions || null),
             videoResolutionNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.videoResolutionNotes) : normalizeValueNotes(config.videoResolutionNotes),
             videoResolutionNotesEnabled: resolvedLibrary ? !!resolvedLibrary.videoResolutionNotesEnabled : !!config.videoResolutionNotesEnabled,
@@ -5467,6 +5463,30 @@ function TapnowApp() {
             seen.add(key);
             items.push({ url, type, ...meta });
         };
+        const attachProxyMeta = (meta = {}, sourceItem = null, modelKey = null) => {
+            if (sourceItem) {
+                const provider = sourceItem.provider || sourceItem.apiConfig?.provider || meta.provider;
+                const useProxy = getItemProxyPreference(sourceItem);
+                return {
+                    ...meta,
+                    provider,
+                    apiConfig: sourceItem.apiConfig || meta.apiConfig,
+                    useProxy
+                };
+            }
+            if (modelKey) {
+                const config = getApiConfigByKey(modelKey);
+                const provider = config?.provider || meta.provider;
+                const useProxy = provider ? getItemProxyPreference({ provider }) : false;
+                return {
+                    ...meta,
+                    provider,
+                    apiConfig: config ? { modelId: config.id, provider: config.provider } : meta.apiConfig,
+                    useProxy
+                };
+            }
+            return meta;
+        };
 
         targetConnections.forEach(conn => {
             const sourceNode = nodesMap.get(conn.from);
@@ -5476,13 +5496,26 @@ function TapnowApp() {
                 const latest = history.find(h => h.sourceNodeId === sourceNode.id && h.status === 'completed');
                 if (!latest) return;
                 const latestPrompt = latest.prompt || sourceNode.settings?.prompt || sourceNode.settings?.videoPrompt || '';
+                const proxyMeta = attachProxyMeta({}, latest);
                 if (latest.mjImages && latest.mjImages.length > 0) {
-                    latest.mjImages.forEach(url => pushItem(url, latest.type || 'image', { prompt: latestPrompt, originalUrl: latest.mjOriginalUrl || latest.originalUrl || url }));
+                    latest.mjImages.forEach(url => pushItem(url, latest.type || 'image', {
+                        prompt: latestPrompt,
+                        originalUrl: latest.mjOriginalUrl || latest.originalUrl || url,
+                        ...proxyMeta
+                    }));
                 } else if (latest.output_images && latest.output_images.length > 0) {
-                    latest.output_images.forEach(url => pushItem(url, latest.type || 'image', { prompt: latestPrompt, originalUrl: latest.originalUrl || url }));
+                    latest.output_images.forEach(url => pushItem(url, latest.type || 'image', {
+                        prompt: latestPrompt,
+                        originalUrl: latest.originalUrl || url,
+                        ...proxyMeta
+                    }));
                 } else {
                     const url = latest.url || latest.originalUrl || latest.mjOriginalUrl;
-                    if (url) pushItem(url, latest.type || (sourceNode.type === 'gen-video' ? 'video' : 'image'), { prompt: latestPrompt, originalUrl: latest.originalUrl || url });
+                    if (url) pushItem(url, latest.type || (sourceNode.type === 'gen-video' ? 'video' : 'image'), {
+                        prompt: latestPrompt,
+                        originalUrl: latest.originalUrl || url,
+                        ...proxyMeta
+                    });
                 }
                 return;
             }
@@ -5493,20 +5526,36 @@ function TapnowApp() {
                 const projectTitle = sourceNode.settings?.projectTitle || '';
                 shots.forEach(shot => {
                     if (!shot.outputEnabled) return;
+                    const shotProxyMeta = attachProxyMeta({}, null, shot.model);
                     if (mode === 'image') {
                         if (shot.output_images && shot.output_images.length > 0) {
                             shot.output_images.forEach(url => {
-                                pushItem(url, 'image', { prompt: shot.prompt || shot.description || '', projectTitle, originalUrl: url });
+                                pushItem(url, 'image', {
+                                    prompt: shot.prompt || shot.description || '',
+                                    projectTitle,
+                                    originalUrl: url,
+                                    ...shotProxyMeta
+                                });
                             });
                         } else {
                             const idx = shot.selectedImageIndex ?? -1;
                             if (idx >= 0 && shot.output_images && shot.output_images[idx]) {
-                                pushItem(shot.output_images[idx], 'image', { prompt: shot.prompt || shot.description || '', projectTitle, originalUrl: shot.output_images[idx] });
+                                pushItem(shot.output_images[idx], 'image', {
+                                    prompt: shot.prompt || shot.description || '',
+                                    projectTitle,
+                                    originalUrl: shot.output_images[idx],
+                                    ...shotProxyMeta
+                                });
                             }
                         }
                     } else {
                         const url = shot.output_url || shot.image_url;
-                        if (url) pushItem(url, isVideoUrl(url) ? 'video' : 'image', { prompt: shot.prompt || shot.description || '', projectTitle, originalUrl: url });
+                        if (url) pushItem(url, isVideoUrl(url) ? 'video' : 'image', {
+                            prompt: shot.prompt || shot.description || '',
+                            projectTitle,
+                            originalUrl: url,
+                            ...shotProxyMeta
+                        });
                     }
                 });
                 return;
@@ -5534,7 +5583,7 @@ function TapnowApp() {
         });
 
         return items;
-    }, [connectionsByNode, nodesMap, history]);
+    }, [connectionsByNode, nodesMap, history, getItemProxyPreference, getApiConfigByKey]);
 
     // 实时更新节点计时器
     useEffect(() => {
@@ -7053,10 +7102,14 @@ function TapnowApp() {
             modelName: newId,
             type: 'Image',
             ratioLimits: null,
+            ratioNotes: {},
+            ratioNotesEnabled: false,
             resolutionLimits: null,
             resolutionNotes: {},
             resolutionNotesEnabled: false,
             durations: null,
+            durationNotes: {},
+            durationNotesEnabled: false,
             videoResolutions: null,
             videoResolutionNotes: {},
             videoResolutionNotesEnabled: false,
@@ -7079,6 +7132,19 @@ function TapnowApp() {
             return next;
         });
     };
+
+    const isLibraryNotesCollapsed = useCallback((entryId, fieldKey) => {
+        const key = `${entryId}:${fieldKey}`;
+        return !!libraryNotesCollapsed[key];
+    }, [libraryNotesCollapsed]);
+
+    const toggleLibraryNotesCollapsed = useCallback((entryId, fieldKey) => {
+        const key = `${entryId}:${fieldKey}`;
+        setLibraryNotesCollapsed(prev => ({
+            ...prev,
+            [key]: !prev[key]
+        }));
+    }, []);
 
     const addModelLibraryCustomParam = (entryId) => {
         if (!entryId) return;
@@ -12889,10 +12955,14 @@ function TapnowApp() {
                                 type: entry.type || 'Chat',
                                 apiType: entry.apiType || 'openai',
                                 ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
+                                ratioNotes: normalizeValueNotes(entry.ratioNotes),
+                                ratioNotesEnabled: !!entry.ratioNotesEnabled,
                                 resolutionLimits: Array.isArray(entry.resolutionLimits) ? entry.resolutionLimits : null,
                                 resolutionNotes: normalizeValueNotes(entry.resolutionNotes),
                                 resolutionNotesEnabled: !!entry.resolutionNotesEnabled,
                                 durations: Array.isArray(entry.durations) ? entry.durations : null,
+                                durationNotes: normalizeValueNotes(entry.durationNotes),
+                                durationNotesEnabled: !!entry.durationNotesEnabled,
                                 videoResolutions: Array.isArray(entry.videoResolutions) ? entry.videoResolutions : null,
                                 videoResolutionNotes: normalizeValueNotes(entry.videoResolutionNotes),
                                 videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
@@ -16872,8 +16942,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                         a.download = filename;
                         a.click();
                     } else {
-                        const resp = await fetch(url);
-                        const blob = await resp.blob();
+                        const useProxy = getItemProxyPreference(firstItem);
+                        const { blob } = await fetchCacheSource(url, { useProxy });
                         const a = document.createElement('a');
                         a.href = URL.createObjectURL(blob);
                         a.download = filename;
@@ -16926,8 +16996,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                             while (n--) u8arr[n] = bstr.charCodeAt(n);
                             blob = new Blob([u8arr], { type: mime });
                         } else {
-                            const resp = await fetch(res.url);
-                            blob = await resp.blob();
+                            const useProxy = getItemProxyPreference(item);
+                            const result = await fetchCacheSource(res.url, { useProxy });
+                            blob = result.blob;
                         }
 
                         let ext = blob.type.split('/')[1] || 'png';
@@ -18742,7 +18813,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     onMouseDown={(e) => e.stopPropagation()}
                                                 >
                                                     {(durationOptions.length > 0 ? durationOptions : ['5s', '10s', '15s']).map(d => (
-                                                        <option key={d} value={d}>{d}</option>
+                                                        <option key={d} value={d}>
+                                                            {getValueLabelWithNotes(d, !!resolutionConfig?.durationNotesEnabled, resolutionConfig?.durationNotes || {})}
+                                                        </option>
                                                     ))}
                                                 </select>
                                             </div>
@@ -18758,9 +18831,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         }`}
                                                     onMouseDown={(e) => e.stopPropagation()}
                                                 >
-                                                    <option value="16:9">16:9</option>
-                                                    <option value="9:16">9:16</option>
-                                                    <option value="1:1">1:1</option>
+                                                    {getRatiosForModel(modelId).map((ratio) => (
+                                                        <option key={ratio} value={ratio}>
+                                                            {ratio === 'Auto'
+                                                                ? 'Auto'
+                                                                : getValueLabelWithNotes(ratio, !!resolutionConfig?.ratioNotesEnabled, resolutionConfig?.ratioNotes || {})}
+                                                        </option>
+                                                    ))}
                                                 </select>
                                             </div>
 
@@ -22096,6 +22173,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             const ratioOptions = mode === 'video'
                                                                                 ? getRatiosForModel(shot.model)
                                                                                 : RATIOS;
+                                                                            const ratioConfig = getApiConfigByKey(shot.model);
                                                                             return (
                                                                                 <select
                                                                                     value={shot.ratio || (mode === 'video' ? '16:9' : '1:1')}
@@ -22108,7 +22186,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         }`}
                                                                                 >
                                                                                     {ratioOptions.map(ratio => (
-                                                                                        <option key={ratio} value={ratio}>{ratio}</option>
+                                                                                        <option key={ratio} value={ratio}>
+                                                                                            {ratio === 'Auto'
+                                                                                                ? 'Auto'
+                                                                                                : getValueLabelWithNotes(ratio, !!ratioConfig?.ratioNotesEnabled, ratioConfig?.ratioNotes || {})}
+                                                                                        </option>
                                                                                     ))}
                                                                                 </select>
                                                                             );
@@ -22190,17 +22272,19 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                     onChange={(e) => updateShot(node.id, shot.id, { duration: e.target.value })}
                                                                                     onClick={(e) => e.stopPropagation()}
                                                                                     onMouseDown={(e) => e.stopPropagation()}
-                                                                                    className={`text-xs px-2 py-1 rounded border outline-none transition-colors ${theme === 'dark'
-                                                                                        ? 'bg-zinc-800 border-zinc-700 text-zinc-200 hover:border-zinc-600'
-                                                                                        : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 hover:border-[#d7cfb2]' : 'bg-white border-zinc-300 text-zinc-800 hover:border-zinc-400'
-                                                                                        }`}
-                                                                                >
-                                                                                    {availableDurations.map(duration => (
-                                                                                        <option key={duration} value={duration}>{duration}</option>
-                                                                                    ))}
-                                                                                </select>
-                                                                            );
-                                                                        })()}
+                                                                                className={`text-xs px-2 py-1 rounded border outline-none transition-colors ${theme === 'dark'
+                                                                                    ? 'bg-zinc-800 border-zinc-700 text-zinc-200 hover:border-zinc-600'
+                                                                                    : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 hover:border-[#d7cfb2]' : 'bg-white border-zinc-300 text-zinc-800 hover:border-zinc-400'
+                                                                                    }`}
+                                                                            >
+                                                                                {availableDurations.map(duration => (
+                                                                                    <option key={duration} value={duration}>
+                                                                                        {getValueLabelWithNotes(duration, !!config?.durationNotesEnabled, config?.durationNotes || {})}
+                                                                                    </option>
+                                                                                ))}
+                                                                            </select>
+                                                                        );
+                                                                    })()}
                                                                         {(node.settings?.mode || 'video') === 'video' && (() => {
                                                                             const modelId = shot.model || '';
                                                                             const config = getApiConfigByKey(modelId);
@@ -23857,7 +23941,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border-zinc-300'
                                                         }`}
                                                 >
-                                                    {node.settings?.ratio || 'Auto'}
+                                                    {(() => {
+                                                        const ratioValue = node.settings?.ratio || 'Auto';
+                                                        const ratioConfig = getApiConfigByKey(node.settings?.model);
+                                                        return ratioValue === 'Auto'
+                                                            ? 'Auto'
+                                                            : getValueLabelWithNotes(ratioValue, !!ratioConfig?.ratioNotesEnabled, ratioConfig?.ratioNotes || {});
+                                                    })()}
                                                 </button>
                                                 {activeDropdown?.nodeId === node.id && activeDropdown.type === 'ratio' && (
                                                     <div
@@ -23867,23 +23957,29 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             }`}
                                                         onMouseDown={e => e.stopPropagation()}
                                                     >
-                                                        {getRatiosForModel(node.settings?.model).map(r => (
-                                                            <button
-                                                                key={r}
-                                                                onClick={() => {
-                                                                    updateNodeSettings(node.id, { ratio: r });
-                                                                    setLastUsedRatio(r);
-                                                                    try { localStorage.setItem('tapnow_last_ratio', r); } catch { }
-                                                                    setActiveDropdown(null);
-                                                                }}
-                                                                className={`w-full text-center py-1 text-[10px] rounded ${theme === 'dark'
-                                                                    ? 'text-zinc-300 hover:bg-zinc-800'
-                                                                    : theme === 'solarized' ? 'text-zinc-700 hover:bg-[#fdf6e3]' : 'text-zinc-700 hover:bg-zinc-100'
-                                                                    }`}
-                                                            >
-                                                                {r}
-                                                            </button>
-                                                        ))}
+                                                        {getRatiosForModel(node.settings?.model).map(r => {
+                                                            const ratioConfig = getApiConfigByKey(node.settings?.model);
+                                                            const label = r === 'Auto'
+                                                                ? 'Auto'
+                                                                : getValueLabelWithNotes(r, !!ratioConfig?.ratioNotesEnabled, ratioConfig?.ratioNotes || {});
+                                                            return (
+                                                                <button
+                                                                    key={r}
+                                                                    onClick={() => {
+                                                                        updateNodeSettings(node.id, { ratio: r });
+                                                                        setLastUsedRatio(r);
+                                                                        try { localStorage.setItem('tapnow_last_ratio', r); } catch { }
+                                                                        setActiveDropdown(null);
+                                                                    }}
+                                                                    className={`w-full text-center py-1 text-[10px] rounded ${theme === 'dark'
+                                                                        ? 'text-zinc-300 hover:bg-zinc-800'
+                                                                        : theme === 'solarized' ? 'text-zinc-700 hover:bg-[#fdf6e3]' : 'text-zinc-700 hover:bg-zinc-100'
+                                                                        }`}
+                                                                >
+                                                                    {label}
+                                                                </button>
+                                                            );
+                                                        })}
                                                     </div>
                                                 )}
                                             </div>
@@ -24061,7 +24157,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border-zinc-300'
                                                                         }`}
                                                                 >
-                                                                    {currentDuration}
+                                                                    {getValueLabelWithNotes(currentDuration, !!currentModel?.durationNotesEnabled, currentModel?.durationNotes || {})}
                                                                 </button>
                                                                 {activeDropdown?.nodeId === node.id && activeDropdown.type === 'duration' && (
                                                                     <div
@@ -24083,7 +24179,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                     : theme === 'solarized' ? 'text-zinc-700 hover:bg-[#fdf6e3]' : 'text-zinc-700 hover:bg-zinc-100'
                                                                                     }`}
                                                                             >
-                                                                                {d}
+                                                                                {getValueLabelWithNotes(d, !!currentModel?.durationNotesEnabled, currentModel?.durationNotes || {})}
                                                                             </button>
                                                                         ))}
                                                                     </div>
@@ -24420,7 +24516,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 className={`p-2.5 rounded-lg transition-all ${activeTool === tool.id
                                     ? theme === 'dark'
                                         ? 'bg-zinc-800 text-white'
-                                        : 'bg-zinc-200 text-zinc-900'
+                                        : theme === 'solarized'
+                                            ? 'bg-[#616161] text-[#fdf6e3] hover:bg-[#555555]'
+                                            : 'bg-zinc-200 text-zinc-900'
                                     : theme === 'dark'
                                         ? 'text-zinc-500 hover:text-zinc-300'
                                         : 'text-zinc-500 hover:text-zinc-800'
@@ -24438,9 +24536,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     : 'bg-blue-600 text-white'
                                 : theme === 'dark'
                                     ? 'text-zinc-500 hover:text-zinc-300'
-                                    : theme === 'solarized'
-                                        ? 'bg-[#616161] text-[#fdf6e3] hover:bg-[#555555]'
-                                        : 'text-zinc-500 hover:text-zinc-800'
+                                    : 'text-zinc-500 hover:text-zinc-800'
                                 }`}
                             title="AI 对话"
                         >
@@ -26561,26 +26657,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const promptSlug = (item.prompt || 'download').replace(/[\\/:*?"<>|]/g, '_').slice(0, 50);
                                             const filename = `${promptSlug}_${Date.now()}.${ext}`;
 
-                                            // 判断是 data URL 还是远程 URL
-                                            if (item.url.startsWith('data:')) {
-                                                // data URL 直接下载
-                                                const link = document.createElement('a');
-                                                link.href = item.url;
-                                                link.download = filename;
-                                                document.body.appendChild(link);
-                                                link.click();
-                                                document.body.removeChild(link);
-                                            } else {
-                                                // 远程 URL 需要 fetch 转 blob
-                                                const response = await fetch(item.url);
-                                                const blob = await response.blob();
-                                                const blobUrl = window.URL.createObjectURL(blob);
-                                                const a = document.createElement('a');
-                                                a.href = blobUrl;
-                                                a.download = filename;
-                                                a.click();
-                                                window.URL.revokeObjectURL(blobUrl);
-                                            }
+                                            const useProxy = getItemProxyPreference(item);
+                                            const { blob } = await fetchCacheSource(item.url, { useProxy });
+                                            const blobUrl = window.URL.createObjectURL(blob);
+                                            const a = document.createElement('a');
+                                            a.href = blobUrl;
+                                            a.download = filename;
+                                            a.click();
+                                            window.URL.revokeObjectURL(blobUrl);
                                         } catch (err) {
                                             console.error('下载失败:', err);
                                             showToast('下载失败，请重试', 'error');
@@ -27529,10 +27613,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const isPreviewOpen = libraryPreviewModels.has(entry.id);
                                             const ratioAll = entry.ratioLimits === null;
                                             const ratioValues = Array.isArray(entry.ratioLimits) ? entry.ratioLimits : [];
+                                            const ratioNotes = entry.ratioNotes || {};
+                                            const ratioNotesEnabled = !!entry.ratioNotesEnabled;
                                             const resolutionValues = Array.isArray(entry.resolutionLimits) ? entry.resolutionLimits : [];
                                             const resolutionNotes = entry.resolutionNotes || {};
                                             const resolutionNotesEnabled = !!entry.resolutionNotesEnabled;
                                             const durationValues = Array.isArray(entry.durations) ? entry.durations : [];
+                                            const durationNotes = entry.durationNotes || {};
+                                            const durationNotesEnabled = !!entry.durationNotesEnabled;
                                             const videoResolutionValues = Array.isArray(entry.videoResolutions) ? entry.videoResolutions : [];
                                             const videoResolutionNotes = entry.videoResolutionNotes || {};
                                             const videoResolutionNotesEnabled = !!entry.videoResolutionNotesEnabled;
@@ -27681,7 +27769,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <TagListEditor
                                                                             label="图片比例"
                                                                             values={ratioValues}
-                                                                            onChange={(values) => updateModelLibraryEntry(entry.id, { ratioLimits: values })}
+                                                                            onChange={(values) => {
+                                                                                const nextNotes = { ...ratioNotes };
+                                                                                Object.keys(nextNotes).forEach((key) => {
+                                                                                    if (!values.includes(key)) delete nextNotes[key];
+                                                                                });
+                                                                                updateModelLibraryEntry(entry.id, { ratioLimits: values, ratioNotes: nextNotes });
+                                                                            }}
                                                                             placeholder="例：1:1,16:9"
                                                                             disabled={!isEditing}
                                                                             inputDisabled={!isEditing || ratioAll}
@@ -27689,7 +27783,56 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             allowAllLabel="全比例"
                                                                             allowAll={ratioAll}
                                                                             onToggleAll={(checked) => updateModelLibraryEntry(entry.id, { ratioLimits: checked ? null : [] })}
+                                                                            formatItem={(value) => getValueLabelWithNotes(value, ratioNotesEnabled, ratioNotes)}
                                                                         />
+                                                                        {ratioValues.length > 0 && (
+                                                                            <div className="mt-1 space-y-1">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>比例映射提示名</div>
+                                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                                        <input
+                                                                                            type="checkbox"
+                                                                                            checked={ratioNotesEnabled}
+                                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { ratioNotesEnabled: e.target.checked })}
+                                                                                            disabled={!isEditing}
+                                                                                        />
+                                                                                        <span>启用提示</span>
+                                                                                    </label>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>提示用于辅助选择</span>
+                                                                                    <button
+                                                                                        onClick={() => toggleLibraryNotesCollapsed(entry.id, 'ratio')}
+                                                                                        className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                        title={isLibraryNotesCollapsed(entry.id, 'ratio') ? '展开提示' : '折叠提示'}
+                                                                                    >
+                                                                                        <ChevronDown size={12} className={`transition-transform ${isLibraryNotesCollapsed(entry.id, 'ratio') ? '' : 'rotate-180'}`} />
+                                                                                    </button>
+                                                                                </div>
+                                                                                {ratioNotesEnabled && !isLibraryNotesCollapsed(entry.id, 'ratio') && ratioValues.map((value) => (
+                                                                                    <div key={value} className="flex items-center gap-2">
+                                                                                        <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
+                                                                                        <input
+                                                                                            value={ratioNotes[value] || ''}
+                                                                                            onChange={(e) => {
+                                                                                                const nextNotes = { ...ratioNotes };
+                                                                                                const noteValue = e.target.value;
+                                                                                                if (noteValue) {
+                                                                                                    nextNotes[value] = noteValue;
+                                                                                                } else {
+                                                                                                    delete nextNotes[value];
+                                                                                                }
+                                                                                                updateModelLibraryEntry(entry.id, { ratioNotes: nextNotes });
+                                                                                            }}
+                                                                                            placeholder="例：1:1 / 竖屏"
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                                }`}
+                                                                                        />
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                     <div className="col-span-6">
                                                                         <TagListEditor
@@ -27711,7 +27854,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         {resolutionValues.length > 0 && (
                                                                             <div className="mt-1 space-y-1">
                                                                                 <div className="flex items-center gap-2">
-                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>分辨率显示名</div>
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>分辨率映射提示名</div>
                                                                                     <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
                                                                                         <input
                                                                                             type="checkbox"
@@ -27719,11 +27862,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             onChange={(e) => updateModelLibraryEntry(entry.id, { resolutionNotesEnabled: e.target.checked })}
                                                                                             disabled={!isEditing}
                                                                                         />
-                                                                                        <span>启用重命名</span>
+                                                                                        <span>启用提示</span>
                                                                                     </label>
-                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>仅展示，不影响提交</span>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>提示用于辅助选择</span>
+                                                                                    <button
+                                                                                        onClick={() => toggleLibraryNotesCollapsed(entry.id, 'resolution')}
+                                                                                        className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                        title={isLibraryNotesCollapsed(entry.id, 'resolution') ? '展开提示' : '折叠提示'}
+                                                                                    >
+                                                                                        <ChevronDown size={12} className={`transition-transform ${isLibraryNotesCollapsed(entry.id, 'resolution') ? '' : 'rotate-180'}`} />
+                                                                                    </button>
                                                                                 </div>
-                                                                                {resolutionNotesEnabled && resolutionValues.map((value) => (
+                                                                                {resolutionNotesEnabled && !isLibraryNotesCollapsed(entry.id, 'resolution') && resolutionValues.map((value) => (
                                                                                     <div key={value} className="flex items-center gap-2">
                                                                                         <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
                                                                                         <input
@@ -27759,7 +27909,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         <TagListEditor
                                                                             label="视频比例"
                                                                             values={ratioValues}
-                                                                            onChange={(values) => updateModelLibraryEntry(entry.id, { ratioLimits: values })}
+                                                                            onChange={(values) => {
+                                                                                const nextNotes = { ...ratioNotes };
+                                                                                Object.keys(nextNotes).forEach((key) => {
+                                                                                    if (!values.includes(key)) delete nextNotes[key];
+                                                                                });
+                                                                                updateModelLibraryEntry(entry.id, { ratioLimits: values, ratioNotes: nextNotes });
+                                                                            }}
                                                                             placeholder="例：16:9,9:16"
                                                                             disabled={!isEditing}
                                                                             inputDisabled={!isEditing || ratioAll}
@@ -27767,13 +27923,68 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             allowAllLabel="全比例"
                                                                             allowAll={ratioAll}
                                                                             onToggleAll={(checked) => updateModelLibraryEntry(entry.id, { ratioLimits: checked ? null : [] })}
+                                                                            formatItem={(value) => getValueLabelWithNotes(value, ratioNotesEnabled, ratioNotes)}
                                                                         />
+                                                                        {ratioValues.length > 0 && (
+                                                                            <div className="mt-1 space-y-1">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>比例映射提示名</div>
+                                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                                        <input
+                                                                                            type="checkbox"
+                                                                                            checked={ratioNotesEnabled}
+                                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { ratioNotesEnabled: e.target.checked })}
+                                                                                            disabled={!isEditing}
+                                                                                        />
+                                                                                        <span>启用提示</span>
+                                                                                    </label>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>提示用于辅助选择</span>
+                                                                                    <button
+                                                                                        onClick={() => toggleLibraryNotesCollapsed(entry.id, 'ratio')}
+                                                                                        className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                        title={isLibraryNotesCollapsed(entry.id, 'ratio') ? '展开提示' : '折叠提示'}
+                                                                                    >
+                                                                                        <ChevronDown size={12} className={`transition-transform ${isLibraryNotesCollapsed(entry.id, 'ratio') ? '' : 'rotate-180'}`} />
+                                                                                    </button>
+                                                                                </div>
+                                                                                {ratioNotesEnabled && !isLibraryNotesCollapsed(entry.id, 'ratio') && ratioValues.map((value) => (
+                                                                                    <div key={value} className="flex items-center gap-2">
+                                                                                        <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
+                                                                                        <input
+                                                                                            value={ratioNotes[value] || ''}
+                                                                                            onChange={(e) => {
+                                                                                                const nextNotes = { ...ratioNotes };
+                                                                                                const noteValue = e.target.value;
+                                                                                                if (noteValue) {
+                                                                                                    nextNotes[value] = noteValue;
+                                                                                                } else {
+                                                                                                    delete nextNotes[value];
+                                                                                                }
+                                                                                                updateModelLibraryEntry(entry.id, { ratioNotes: nextNotes });
+                                                                                            }}
+                                                                                            placeholder="例：16:9 / 横屏"
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                                }`}
+                                                                                        />
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                     <div className="col-span-4">
                                                                         <TagListEditor
                                                                             label="视频时长"
                                                                             values={durationValues}
-                                                                            onChange={(values) => updateModelLibraryEntry(entry.id, { durations: values })}
+                                                                            onChange={(values) => {
+                                                                                const nextNotes = { ...durationNotes };
+                                                                                Object.keys(nextNotes).forEach((key) => {
+                                                                                    if (!values.includes(key)) delete nextNotes[key];
+                                                                                });
+                                                                                updateModelLibraryEntry(entry.id, { durations: values, durationNotes: nextNotes });
+                                                                            }}
                                                                             placeholder="例：5s,10s"
                                                                             disabled={!isEditing}
                                                                             theme={theme}
@@ -27781,7 +27992,56 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 const trimmed = String(value).trim();
                                                                                 return trimmed.endsWith('s') ? trimmed : `${trimmed}s`;
                                                                             }}
+                                                                            formatItem={(value) => getValueLabelWithNotes(value, durationNotesEnabled, durationNotes)}
                                                                         />
+                                                                        {durationValues.length > 0 && (
+                                                                            <div className="mt-1 space-y-1">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>时长映射提示名</div>
+                                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                                        <input
+                                                                                            type="checkbox"
+                                                                                            checked={durationNotesEnabled}
+                                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { durationNotesEnabled: e.target.checked })}
+                                                                                            disabled={!isEditing}
+                                                                                        />
+                                                                                        <span>启用提示</span>
+                                                                                    </label>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>提示用于辅助选择</span>
+                                                                                    <button
+                                                                                        onClick={() => toggleLibraryNotesCollapsed(entry.id, 'duration')}
+                                                                                        className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                        title={isLibraryNotesCollapsed(entry.id, 'duration') ? '展开提示' : '折叠提示'}
+                                                                                    >
+                                                                                        <ChevronDown size={12} className={`transition-transform ${isLibraryNotesCollapsed(entry.id, 'duration') ? '' : 'rotate-180'}`} />
+                                                                                    </button>
+                                                                                </div>
+                                                                                {durationNotesEnabled && !isLibraryNotesCollapsed(entry.id, 'duration') && durationValues.map((value) => (
+                                                                                    <div key={value} className="flex items-center gap-2">
+                                                                                        <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
+                                                                                        <input
+                                                                                            value={durationNotes[value] || ''}
+                                                                                            onChange={(e) => {
+                                                                                                const nextNotes = { ...durationNotes };
+                                                                                                const noteValue = e.target.value;
+                                                                                                if (noteValue) {
+                                                                                                    nextNotes[value] = noteValue;
+                                                                                                } else {
+                                                                                                    delete nextNotes[value];
+                                                                                                }
+                                                                                                updateModelLibraryEntry(entry.id, { durationNotes: nextNotes });
+                                                                                            }}
+                                                                                            placeholder="例：5s / 快速"
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                                }`}
+                                                                                        />
+                                                                                    </div>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                     <div className="col-span-4">
                                                                         <TagListEditor
@@ -27803,7 +28063,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         {videoResolutionValues.length > 0 && (
                                                                             <div className="mt-1 space-y-1">
                                                                                 <div className="flex items-center gap-2">
-                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>分辨率显示名</div>
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>分辨率映射提示名</div>
                                                                                     <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
                                                                                         <input
                                                                                             type="checkbox"
@@ -27811,11 +28071,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             onChange={(e) => updateModelLibraryEntry(entry.id, { videoResolutionNotesEnabled: e.target.checked })}
                                                                                             disabled={!isEditing}
                                                                                         />
-                                                                                        <span>启用重命名</span>
+                                                                                        <span>启用提示</span>
                                                                                     </label>
-                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>仅展示，不影响提交</span>
+                                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>提示用于辅助选择</span>
+                                                                                    <button
+                                                                                        onClick={() => toggleLibraryNotesCollapsed(entry.id, 'video-resolution')}
+                                                                                        className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                        title={isLibraryNotesCollapsed(entry.id, 'video-resolution') ? '展开提示' : '折叠提示'}
+                                                                                    >
+                                                                                        <ChevronDown size={12} className={`transition-transform ${isLibraryNotesCollapsed(entry.id, 'video-resolution') ? '' : 'rotate-180'}`} />
+                                                                                    </button>
                                                                                 </div>
-                                                                                {videoResolutionNotesEnabled && videoResolutionValues.map((value) => (
+                                                                                {videoResolutionNotesEnabled && !isLibraryNotesCollapsed(entry.id, 'video-resolution') && videoResolutionValues.map((value) => (
                                                                                     <div key={value} className="flex items-center gap-2">
                                                                                         <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
                                                                                         <input
@@ -27941,7 +28208,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                 {paramValues.length > 0 && (
                                                                                     <div className="space-y-1">
                                                                                         <div className="flex items-center gap-2">
-                                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>参数显示名</div>
+                                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>参数映射提示名</div>
                                                                                             <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
                                                                                                 <input
                                                                                                     type="checkbox"
@@ -27949,11 +28216,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                     onChange={(e) => updateModelLibraryCustomParam(entry.id, param.id, { notesEnabled: e.target.checked })}
                                                                                                     disabled={!isEditing}
                                                                                                 />
-                                                                                                <span>启用重命名</span>
+                                                                                                <span>启用提示</span>
                                                                                             </label>
-                                                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>仅展示，不影响提交</span>
+                                                                                            <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>提示用于辅助选择</span>
+                                                                                            <button
+                                                                                                onClick={() => toggleLibraryNotesCollapsed(entry.id, `param-${param.id}`)}
+                                                                                                className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                                title={isLibraryNotesCollapsed(entry.id, `param-${param.id}`) ? '展开提示' : '折叠提示'}
+                                                                                            >
+                                                                                                <ChevronDown size={12} className={`transition-transform ${isLibraryNotesCollapsed(entry.id, `param-${param.id}`) ? '' : 'rotate-180'}`} />
+                                                                                            </button>
                                                                                         </div>
-                                                                                        {notesEnabled && paramValues.map((value) => (
+                                                                                        {notesEnabled && !isLibraryNotesCollapsed(entry.id, `param-${param.id}`) && paramValues.map((value) => (
                                                                                             <div key={value} className="flex items-center gap-2">
                                                                                                 <span className={`text-[9px] w-24 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`} title={value}>{value}</span>
                                                                                                 <input
@@ -28116,7 +28390,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             );
                                         })}
                                     </div>
-                                    <p className="text-[9px] text-zinc-500">提示：显示名仅用于展示，模型ID用于真实调用；不填写列表将使用默认限制。</p>
+                                    <p className="text-[9px] text-zinc-500">提示：映射提示名仅用于展示，模型ID用于真实调用；不填写列表将使用默认限制。</p>
                                 </div>
                             )}
 
