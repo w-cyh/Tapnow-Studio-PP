@@ -4034,9 +4034,7 @@ function TapnowApp() {
                 throw new Error('Blob 已失效');
             }
         }
-        const useProxy = typeof options.useProxy === 'boolean'
-            ? options.useProxy
-            : (typeof getProxyPreferenceForUrl === 'function' ? getProxyPreferenceForUrl(rawUrl, false) : false);
+        const useProxy = options.useProxy === true;
         const resolvedTarget = useProxy ? resolveCacheFetchUrl(targetUrl, true) : targetUrl;
         if (!resolvedTarget) throw new Error('Invalid URL');
         return await fetchBlob(resolvedTarget);
@@ -4501,12 +4499,14 @@ function TapnowApp() {
             const mjThumbnails = await Promise.all(rawUrls.map(async (url) => {
                 const resolved = resolveHistoryUrl(item, url);
                 if (!resolved) return null;
-                return await generateThumbnail(resolved, quality);
+                const useProxy = getProxyPreferenceForUrl(resolved, false);
+                return await generateThumbnail(resolved, quality, { useProxy });
             }));
             setHistory(prev => prev.map(h => h.id === item.id ? { ...h, mjThumbnails } : h));
         } else {
             const resolved = resolveHistoryUrl(item, rawUrls[0]);
-            const thumbnail = resolved ? await generateThumbnail(resolved, quality) : null;
+            const useProxy = resolved ? getProxyPreferenceForUrl(resolved, false) : false;
+            const thumbnail = resolved ? await generateThumbnail(resolved, quality, { useProxy }) : null;
             setHistory(prev => prev.map(h => h.id === item.id ? { ...h, thumbnailUrl: thumbnail || null } : h));
         }
         if (!options.silent) {
@@ -4604,7 +4604,8 @@ function TapnowApp() {
                     if (!sourceUrl) continue;
                     let thumbnail = thumbnailCacheRef.current.get(sourceUrl);
                     if (!thumbnail) {
-                        thumbnail = await generateThumbnail(sourceUrl, quality);
+                        const useProxy = getProxyPreferenceForUrl(sourceUrl, false);
+                        thumbnail = await generateThumbnail(sourceUrl, quality, { useProxy });
                         if (thumbnail) thumbnailCacheRef.current.set(sourceUrl, thumbnail);
                     }
 
@@ -4614,7 +4615,8 @@ function TapnowApp() {
                             if (!url) return null;
                             const cached = thumbnailCacheRef.current.get(url);
                             if (cached) return cached;
-                            const thumb = await generateThumbnail(url, quality);
+                            const useProxy = getProxyPreferenceForUrl(url, false);
+                            const thumb = await generateThumbnail(url, quality, { useProxy });
                             if (thumb) thumbnailCacheRef.current.set(url, thumb);
                             return thumb;
                         }));
@@ -8523,7 +8525,8 @@ function TapnowApp() {
                 img.src = imageUrl;
             } else {
                 // 对于其他URL，先转换为blob再加载（避免CORS问题）
-                getBlobFromUrl(imageUrl).then(blob => {
+                const useProxy = getProxyPreferenceForUrl(imageUrl, false);
+                getBlobFromUrl(imageUrl, { useProxy }).then(blob => {
                     const blobUrl = URL.createObjectURL(blob);
                     img.src = blobUrl;
                 }).catch(reject);
@@ -12272,7 +12275,8 @@ function TapnowApp() {
                     console.warn(`节点 ${node.id} 的内容URL无效: `, url);
                     continue;
                 }
-                const blob = await getBlobFromUrl(url);
+                const useProxy = getProxyPreferenceForUrl(url, false);
+                const blob = await getBlobFromUrl(url, { useProxy });
                 const blobUrl = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = blobUrl;
