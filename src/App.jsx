@@ -537,7 +537,7 @@ const HistoryMjImageCell = memo(({
                 src={displayImgUrl}
                 loading="lazy"
                 className="w-full h-full object-contain"
-                alt={`图片${idx + 1}`}
+                alt=""
                 onLoad={() => setIsLoaded(true)}
                 onError={(e) => {
                     setIsLoaded(false);
@@ -548,7 +548,7 @@ const HistoryMjImageCell = memo(({
             />
             {!isLoaded && (
                 <div
-                    className={`absolute inset-0 flex items-center justify-center text-[10px] ${placeholderClass} pointer-events-none select-none`}
+                    className={`absolute inset-0 flex items-center justify-center text-[12px] ${placeholderClass} pointer-events-none select-none`}
                     style={{ fontFamily: '"Microsoft YaHei","微软雅黑","KaiTi","楷体",serif' }}
                 >
                     图片{idx + 1}
@@ -4128,9 +4128,10 @@ function TapnowApp() {
     const fetchCacheSource = useCallback(async (imageUrl, options = {}) => {
         const useProxy = options.useProxy === true;
         const proxyBaseUrl = options.proxyBaseUrl;
+        const preferLocal = options.preferLocal === true;
         if (!imageUrl) throw new Error('缓存拉取失败: 空链接');
         try {
-            const blob = await getBlobFromUrl(imageUrl, { useProxy, preferLocal: false, proxyBaseUrl });
+            const blob = await getBlobFromUrl(imageUrl, { useProxy, preferLocal, proxyBaseUrl });
             if (!blob || blob.size === 0) throw new Error('缓存拉取失败: 空文件');
             return { blob, source: imageUrl };
         } catch (err) {
@@ -4366,7 +4367,7 @@ function TapnowApp() {
         if (raw.startsWith('data:') || raw.startsWith('blob:')) return false;
         const base = (localServerUrl || '').trim();
         if (base && raw.startsWith(base)) return false;
-        if (historyLocalCacheMap.has(raw)) return false;
+        if (localCacheActive && historyLocalCacheMap.has(raw)) return false;
         if (historyUrlProxyMap.has(raw)) return !!historyUrlProxyMap.get(raw);
         const inferred = inferProviderFromUrl(raw);
         if (inferred) {
@@ -4376,7 +4377,7 @@ function TapnowApp() {
             if (matchedKey && providers[matchedKey]?.useProxy) return true;
         }
         return !!fallback;
-    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, inferProviderFromUrl, providers]);
+    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, inferProviderFromUrl, providers, localCacheActive]);
 
     useEffect(() => {
         const nextPath = {
@@ -5929,7 +5930,7 @@ function TapnowApp() {
                 const baseProxy = typeof useProxyResolver === 'function' ? !!useProxyResolver(item) : false;
                 const useProxy = getProxyPreferenceForUrl(url, baseProxy);
                 if (!url.startsWith('data:')) {
-                    const { blob } = await fetchCacheSource(url, { useProxy, proxyBaseUrl });
+                    const { blob } = await fetchCacheSource(url, { useProxy, proxyBaseUrl, preferLocal: true });
                     content = await new Promise((resolve) => {
                         const reader = new FileReader();
                         reader.onloadend = () => resolve(reader.result);
