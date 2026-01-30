@@ -749,10 +749,16 @@ const HistoryItem = memo(({
     isSelected, // V3.4.16: 选择状态
     onSelect, // V3.4.16: 选择回调
     providers,
-    defaultProviders
+    defaultProviders,
+    historyLocalCacheMap,
+    resolveHistoryUrl
 }) => {
     const primaryUrl = item.url || item.originalUrl || item.mjOriginalUrl || (item.mjImages && item.mjImages.length > 0 ? item.mjImages[0] : null);
-    const mappedCacheUrl = localCacheActive && item.localCacheMap && primaryUrl ? item.localCacheMap[primaryUrl] : null;
+    const mappedCacheUrl = localCacheActive && primaryUrl
+        ? (historyLocalCacheMap && historyLocalCacheMap.has(primaryUrl)
+            ? historyLocalCacheMap.get(primaryUrl)
+            : (item.localCacheMap ? item.localCacheMap[primaryUrl] : null))
+        : null;
     const localCacheFallback = mappedCacheUrl || item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null);
     const hasLocalCache = !!(localCacheActive && localCacheFallback);
     const thumbnailUrl = item.thumbnailUrl || null;
@@ -770,24 +776,24 @@ const HistoryItem = memo(({
         return originalUrl;
     };
     const [videoSrc, setVideoSrc] = useState(null);
-    const getDragUrl = (specificUrl = null) => {
+    const resolveItemUrl = (specificUrl = null) => {
+        if (resolveHistoryUrl) return resolveHistoryUrl(item, specificUrl);
         if (specificUrl) {
             if (localCacheActive && item.localCacheMap && item.localCacheMap[specificUrl]) {
                 return item.localCacheMap[specificUrl];
             }
             return specificUrl;
         }
+        return item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : '') || item.originalUrl || item.mjOriginalUrl || item.url || '';
+    };
+    const getDragUrl = (specificUrl = null) => {
+        if (specificUrl) return resolveItemUrl(specificUrl);
         if (item.mjImages && item.mjImages.length > 0) {
             const index = item.selectedMjImageIndex ?? 0;
             const selected = item.mjImages[index] || item.mjImages[0];
-            if (selected) {
-                if (localCacheActive && item.localCacheMap && item.localCacheMap[selected]) {
-                    return item.localCacheMap[selected];
-                }
-                return selected;
-            }
+            if (selected) return resolveItemUrl(selected);
         }
-        return item.originalUrl || item.mjOriginalUrl || item.url || item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : '') || '';
+        return resolveItemUrl();
     };
     const handleDragStart = (e, specificUrl = null) => {
         const dragUrl = getDragUrl(specificUrl);
@@ -796,6 +802,8 @@ const HistoryItem = memo(({
             source: 'history',
             itemId: item.id,
             url: dragUrl,
+            originalUrl: item.originalUrl || item.mjOriginalUrl || item.url || dragUrl,
+            mjOriginalUrl: item.mjOriginalUrl || item.originalUrl || item.url || dragUrl,
             selectedIndex: item.selectedMjImageIndex ?? 0
         };
         e.dataTransfer.effectAllowed = 'copy';
@@ -1081,7 +1089,9 @@ const HistoryItem = memo(({
         prevProps.isSelected === nextProps.isSelected &&
         prevProps.performanceMode === nextProps.performanceMode &&
         prevProps.localCacheActive === nextProps.localCacheActive &&
-        prevProps.getHistoryMeta === nextProps.getHistoryMeta
+        prevProps.getHistoryMeta === nextProps.getHistoryMeta &&
+        prevProps.historyLocalCacheMap === nextProps.historyLocalCacheMap &&
+        prevProps.resolveHistoryUrl === nextProps.resolveHistoryUrl
     );
 });
 
@@ -1602,13 +1612,10 @@ const DEFAULT_PROVIDERS = {
     'openai': { key: '', url: DEFAULT_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'google': { key: '', url: DEFAULT_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'deepseek': { key: '', url: DEFAULT_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
-    'flux': { key: '', url: DEFAULT_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
     'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
-    'modelscope': { key: '', url: 'https://api-inference.modelscope.cn', apiType: 'modelscope', useProxy: false, forceAsync: true },
     'yunwu': { key: '', url: 'https://yunwu.ai', apiType: 'gemini', useProxy: false, forceAsync: false },
-    'vibecoding': { key: '', url: 'https://vibecodingapi.ai', apiType: 'gemini', useProxy: false, forceAsync: false },
 };
 
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
@@ -1622,9 +1629,7 @@ const DEFAULT_API_CONFIGS = [
 
     // Image Models
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
-    { id: 'flux-kontext-pro', provider: 'flux', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
-    { id: 'Tongyi-MAI/Z-Image-Turbo', provider: 'modelscope', type: 'Image' },
     { id: 'gemini-3-pro-image-preview', provider: 'yunwu', type: 'Image' },
     { id: 'jimeng-4.5', provider: 'jimeng', type: 'Image' },
     { id: 'jimeng-4.1', provider: 'jimeng', type: 'Image' },
@@ -1642,7 +1647,7 @@ const DEFAULT_API_CONFIGS = [
     { id: 'jimeng-video-3.5-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
     { id: 'jimeng-video-veo3', provider: 'jimeng', type: 'Video', durations: ['8s'] },
     { id: 'jimeng-video-veo3.1', provider: 'jimeng', type: 'Video', durations: ['8s'] },
-    { id: 'jimeng-video-sora2', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
+    { id: 'jimeng-video-sora2', provider: 'jimeng', type: 'Video', durations: ['4s', '8s', '12s'] },
     { id: 'jimeng-video-3.0-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
     { id: 'jimeng-video-3.0', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
     { id: 'jimeng-video-3.0-fast', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
@@ -1751,7 +1756,7 @@ const DELETED_MODEL_IDS = [
 const DEFAULT_MODEL_LIBRARY = [
     ...DEFAULT_API_CONFIGS
         .filter((config) => !DELETED_MODEL_IDS.includes(config.id))
-        .filter((config) => !['Tongyi-MAI/Z-Image-Turbo', 'gemini-3-pro-image-preview'].includes(config.id))
+        .filter((config) => !['Tongyi-MAI/Z-Image-Turbo'].includes(config.id))
         .map((config) => {
             const isVideo = config.type === 'Video';
             const supportsFirstLastFrame = isVideo && /veo3\.1/i.test(config.id);
@@ -1768,37 +1773,12 @@ const DEFAULT_MODEL_LIBRARY = [
                 supportsFirstLastFrame,
                 supportsHD,
                 apiType: DEFAULT_PROVIDERS[config.provider]?.apiType || 'openai',
-                customParams: []
+                customParams: [],
+                requestTemplate: getDefaultRequestTemplateForType(config.type || 'Chat'),
+                requestOverrideEnabled: false,
+                requestOverridePatch: null
             });
-        }),
-    {
-        id: 'Tongyi-MAI/Z-Image-Turbo',
-        displayName: 'Z-Image Turbo',
-        modelName: 'Tongyi-MAI/Z-Image-Turbo',
-        type: 'Image',
-        ratioLimits: null,
-        resolutionLimits: ['1K', '2K', '4K'],
-        durations: null,
-        videoResolutions: null,
-        supportsFirstLastFrame: false,
-        supportsHD: false,
-        apiType: 'modelscope',
-        customParams: []
-    },
-    {
-        id: 'gemini-3-pro-image-preview',
-        displayName: 'Gemini 3 Pro Image Preview',
-        modelName: 'gemini-3-pro-image-preview',
-        type: 'Image',
-        ratioLimits: null,
-        resolutionLimits: ['1K', '2K', '4K'],
-        durations: null,
-        videoResolutions: null,
-        supportsFirstLastFrame: false,
-        supportsHD: false,
-        apiType: 'gemini',
-        customParams: []
-    }
+    })
 ];
 
 const getDefaultRatiosForModel = (modelId) => {
@@ -1841,6 +1821,69 @@ const normalizeVideoResolutionLower = (value) => {
     const normalized = normalizeVideoResolution(value);
     if (!normalized || normalized === 'Auto') return '';
     return normalized.toLowerCase();
+};
+const stripValueNotes = (value) => {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/[（(][^）)]*[）)]/g, '')
+        .replace(/\s+/g, '')
+        .trim();
+};
+const normalizeJimengVideoRatio = (value) => {
+    const raw = stripValueNotes(value);
+    if (!raw) return '1:1';
+    if (raw.toLowerCase() === 'auto') return '1:1';
+    const match = raw.match(/^(\d+):(\d+)$/);
+    if (match) {
+        const w = parseInt(match[1], 10);
+        const h = parseInt(match[2], 10);
+        if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+            return `${w}:${h}`;
+        }
+    }
+    return raw;
+};
+const supportsJimengVideoResolution = (modelKey) => {
+    if (!modelKey) return false;
+    const raw = String(modelKey).toLowerCase();
+    if (!raw) return false;
+    if (raw.includes('sora2')) return false;
+    if (raw.includes('veo3')) return false;
+    if (raw.includes('3.5')) return false;
+    if (raw.includes('3.0-pro') || raw.includes('3.5-pro')) return false;
+    if (raw.includes('2.0')) return false;
+    if (raw.includes('vgfm_3.0_fast')) return true;
+    if (raw.includes('vgfm_3.0') && !raw.includes('_pro')) return true;
+    return raw.includes('video-3.0-fast') || raw.includes('video-3.0');
+};
+const normalizeJimengVideoResolution = (value, { allowExplicit = false } = {}) => {
+    const normalized = normalizeVideoResolutionLower(stripValueNotes(value));
+    if (!normalized || normalized === 'auto') return '';
+    if (normalized === '720p' || normalized === '1080p') return normalized;
+    if (normalized === '2k' || normalized === '4k') return '1080p';
+    const cleaned = normalized.replace(/[^0-9x]/g, '');
+    if (/^\d+x\d+$/.test(cleaned)) {
+        if (!allowExplicit) {
+            const [wRaw, hRaw] = cleaned.split('x').map((v) => parseInt(v, 10));
+            const maxSide = Math.max(wRaw || 0, hRaw || 0);
+            if (!maxSide) return '';
+            return maxSide <= 1280 ? '720p' : '1080p';
+        }
+        return cleaned;
+    }
+    return '';
+};
+const normalizeDurationValue = (value, fallback = 8) => {
+    if (value === null || value === undefined) return fallback;
+    const cleaned = String(value).trim().replace(/[^\d]/g, '');
+    const parsed = parseInt(cleaned, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+const normalizeJimengVideoDuration = (value, allowed = []) => {
+    const fallback = allowed && allowed.length > 0 ? allowed[0] : 5;
+    const parsed = normalizeDurationValue(value, fallback);
+    if (!allowed || allowed.length === 0) return parsed;
+    return allowed.includes(parsed) ? parsed : fallback;
 };
 const isImageModelType = (type) => type === 'Image' || type === 'ChatImage';
 const MAX_CUSTOM_PARAMS = 30;
@@ -1890,6 +1933,46 @@ const normalizeCustomParams = (params) => {
         };
     }).filter(Boolean);
 };
+function getDefaultRequestTemplateForType(type) {
+    const modelType = type || 'Chat';
+    let endpoint = '/v1/images/generations';
+    if (modelType === 'Video') endpoint = '/v1/videos/generations';
+    if (modelType === 'Chat' || modelType === 'ChatImage') endpoint = '/v1/chat/completions';
+    let body = {
+        model: '{{modelName}}',
+        prompt: '{{prompt}}'
+    };
+    if (modelType === 'Video') {
+        body = {
+            model: '{{modelName}}',
+            prompt: '{{prompt}}',
+            duration: '{{duration:number}}',
+            ratio: '{{ratio}}',
+            resolution: '{{resolution}}'
+        };
+    } else if (modelType === 'Chat' || modelType === 'ChatImage') {
+        body = {
+            model: '{{modelName}}',
+            messages: [{ role: 'user', content: '{{prompt}}' }],
+            stream: false
+        };
+    } else {
+        body = {
+            model: '{{modelName}}',
+            prompt: '{{prompt}}',
+            n: 1,
+            size: '{{size}}'
+        };
+    }
+    return {
+        enabled: false,
+        endpoint,
+        method: 'POST',
+        bodyType: 'json',
+        headers: { 'Content-Type': 'application/json' },
+        body
+    };
+}
 const getCustomParamSelection = (param, selections) => {
     if (!param || !selections) return '';
     const byId = param.id && selections[param.id];
@@ -2001,6 +2084,200 @@ const applyPreviewOverridePatch = (payload, patch) => {
         payload[key] = value;
     });
     return payload;
+};
+const normalizeRequestTemplate = (template) => {
+    if (!template || typeof template !== 'object') return null;
+    const normalized = {
+        enabled: template.enabled !== false,
+        endpoint: typeof template.endpoint === 'string' ? template.endpoint.trim() : '',
+        method: (template.method || 'POST').toString().toUpperCase(),
+        bodyType: (template.bodyType || 'json').toString().toLowerCase(),
+        headers: (template.headers && typeof template.headers === 'object' && !Array.isArray(template.headers))
+            ? { ...template.headers }
+            : {},
+        body: (template.body && typeof template.body === 'object' && !Array.isArray(template.body))
+            ? template.body
+            : (template.body ?? {})
+    };
+    return normalized;
+};
+const normalizeRequestOverridePatch = (patch) => {
+    return normalizePreviewOverridePatch(patch);
+};
+const TEMPLATE_VAR_PATTERN = /\{\{\s*([a-zA-Z0-9_.-]+)(?::([a-zA-Z0-9_-]+))?\s*\}\}/g;
+const getTemplateVarValue = (vars, path) => {
+    if (!vars || !path) return undefined;
+    return path.split('.').reduce((acc, key) => (acc && acc[key] !== undefined ? acc[key] : undefined), vars);
+};
+const coerceTemplateValue = (value, type, options = {}) => {
+    if (type === 'number') {
+        if (value === null || value === undefined || value === '') return value;
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        const parsed = parseFloat(String(value).replace(/[^\d.-]/g, ''));
+        return Number.isFinite(parsed) ? parsed : value;
+    }
+    if (type === 'string') {
+        return value === null || value === undefined ? '' : String(value);
+    }
+    if (type === 'blob') {
+        if (options.bodyType === 'json' && options.fallbackBlobAsDataUrl) {
+            return options.fallbackBlobAsDataUrl;
+        }
+        return value;
+    }
+    return value;
+};
+const resolveTemplateString = (value, vars, options = {}) => {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    const singleMatch = trimmed.match(/^{{\s*([a-zA-Z0-9_.-]+)(?::([a-zA-Z0-9_-]+))?\s*}}$/);
+    if (singleMatch) {
+        const [, varName, varType] = singleMatch;
+        const fallbackBlob = varType === 'blob'
+            ? (getTemplateVarValue(vars, `${varName}DataUrl`) || getTemplateVarValue(vars, `${varName}DataURL`))
+            : undefined;
+        const raw = getTemplateVarValue(vars, varType === 'blob' ? `${varName}Blob` : varName);
+        return coerceTemplateValue(raw, varType, { bodyType: options.bodyType, fallbackBlobAsDataUrl: fallbackBlob });
+    }
+    return value.replace(TEMPLATE_VAR_PATTERN, (_match, varName, varType) => {
+        const fallbackBlob = varType === 'blob'
+            ? (getTemplateVarValue(vars, `${varName}DataUrl`) || getTemplateVarValue(vars, `${varName}DataURL`))
+            : undefined;
+        const raw = getTemplateVarValue(vars, varType === 'blob' ? `${varName}Blob` : varName);
+        const coerced = coerceTemplateValue(raw, varType, { bodyType: options.bodyType, fallbackBlobAsDataUrl: fallbackBlob });
+        if (coerced === null || coerced === undefined) return '';
+        if (typeof coerced === 'object') {
+            try {
+                return JSON.stringify(coerced);
+            } catch (e) {
+                return '';
+            }
+        }
+        return String(coerced);
+    });
+};
+const resolveTemplateValue = (value, vars, options = {}) => {
+    if (Array.isArray(value)) {
+        return value.map((item) => resolveTemplateValue(item, vars, options));
+    }
+    if (value && typeof value === 'object' && !(value instanceof Blob) && !(value instanceof File)) {
+        const next = {};
+        Object.entries(value).forEach(([key, val]) => {
+            next[key] = resolveTemplateValue(val, vars, options);
+        });
+        return next;
+    }
+    if (typeof value === 'string') {
+        return resolveTemplateString(value, vars, options);
+    }
+    return value;
+};
+const buildRequestFromTemplate = (template, vars, options = {}) => {
+    if (!template) return null;
+    const bodyType = (template.bodyType || 'json').toString().toLowerCase();
+    const resolvedEndpoint = resolveTemplateString(template.endpoint || '', vars, { bodyType });
+    const method = (template.method || 'POST').toString().toUpperCase();
+    const headers = resolveTemplateValue(template.headers || {}, vars, { bodyType });
+    const resolvedBody = resolveTemplateValue(template.body || {}, vars, { bodyType });
+    let body = resolvedBody;
+    if (bodyType === 'multipart') {
+        const form = new FormData();
+        Object.entries(resolvedBody || {}).forEach(([key, val]) => {
+            if (val === undefined || val === null || key === '') return;
+            if (Array.isArray(val)) {
+                val.forEach((item) => {
+                    if (item === undefined || item === null) return;
+                    if (item instanceof Blob || item instanceof File) {
+                        form.append(key, item, item.name || 'file');
+                    } else if (typeof item === 'object') {
+                        form.append(key, JSON.stringify(item));
+                    } else {
+                        form.append(key, String(item));
+                    }
+                });
+                return;
+            }
+            if (val instanceof Blob || val instanceof File) {
+                form.append(key, val, val.name || 'file');
+            } else if (typeof val === 'object') {
+                form.append(key, JSON.stringify(val));
+            } else {
+                form.append(key, String(val));
+            }
+        });
+        body = form;
+    } else if (bodyType === 'raw') {
+        if (typeof body !== 'string') {
+            body = JSON.stringify(body ?? {});
+        }
+    }
+    return {
+        url: resolvedEndpoint,
+        method,
+        headers,
+        body,
+        bodyType
+    };
+};
+const applyRequestOverridePatch = (request, patch) => {
+    if (!request || !patch || typeof patch !== 'object') return request;
+    const next = { ...request };
+    Object.entries(patch).forEach(([key, value]) => {
+        if (!key) return;
+        if (value === null) {
+            delete next[key];
+        } else {
+            next[key] = value;
+        }
+    });
+    return next;
+};
+const coerceFormDataFromObject = (data) => {
+    if (typeof FormData === 'undefined') return data;
+    if (data instanceof FormData) return data;
+    const form = new FormData();
+    const entries = data && typeof data === 'object' ? Object.entries(data) : [];
+    entries.forEach(([key, val]) => {
+        if (val === undefined || val === null || key === '') return;
+        if (Array.isArray(val)) {
+            val.forEach((item) => {
+                if (item === undefined || item === null) return;
+                if (item instanceof Blob || item instanceof File) {
+                    form.append(key, item, item.name || 'file');
+                } else if (typeof item === 'object') {
+                    form.append(key, JSON.stringify(item));
+                } else {
+                    form.append(key, String(item));
+                }
+            });
+            return;
+        }
+        if (val instanceof Blob || val instanceof File) {
+            form.append(key, val, val.name || 'file');
+        } else if (typeof val === 'object') {
+            form.append(key, JSON.stringify(val));
+        } else {
+            form.append(key, String(val));
+        }
+    });
+    return form;
+};
+const formatRequestPreview = (request) => {
+    if (!request) return null;
+    const formatted = { ...request };
+    if (request.body instanceof FormData) {
+        const formEntries = {};
+        request.body.forEach((value, key) => {
+            if (!formEntries[key]) formEntries[key] = [];
+            if (value instanceof Blob || value instanceof File) {
+                formEntries[key].push('[Blob]');
+            } else {
+                formEntries[key].push(value);
+            }
+        });
+        formatted.body = formEntries;
+    }
+    return formatted;
 };
 const getModelLibraryPreviewEndpoint = (entry) => {
     if (!entry) return '/v1/images/generations';
@@ -3184,7 +3461,10 @@ function TapnowApp() {
                         supportsHD: !!entry.supportsHD,
                         customParams: normalizeCustomParams(entry.customParams),
                         previewOverrideEnabled: !!entry.previewOverrideEnabled,
-                        previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch)
+                        previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
+                        requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                        requestOverrideEnabled: !!entry.requestOverrideEnabled,
+                        requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch)
                     })).filter((entry) => entry.id);
                 }
             } catch (e) {
@@ -3193,8 +3473,22 @@ function TapnowApp() {
         }
         return DEFAULT_MODEL_LIBRARY.map((entry) => ({ ...entry }));
     });
-    const initialLibraryCollapseRef = useRef(false);
-
+    const collapsedLibraryStateLoadedRef = useRef(false);
+    const [collapsedLibraryModels, setCollapsedLibraryModels] = useState(() => {
+        const saved = localStorage.getItem('tapnow_model_library_collapsed');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                if (Array.isArray(parsed)) {
+                    collapsedLibraryStateLoadedRef.current = true;
+                    return new Set(parsed.filter(Boolean));
+                }
+            } catch (e) {
+                console.warn('加载模型库折叠状态失败:', e);
+            }
+        }
+        return new Set();
+    });
     useEffect(() => {
         try {
             localStorage.setItem('tapnow_model_library', JSON.stringify(modelLibrary));
@@ -3203,11 +3497,31 @@ function TapnowApp() {
         }
     }, [modelLibrary]);
     useEffect(() => {
-        if (initialLibraryCollapseRef.current) return;
         if (!modelLibrary.length) return;
-        setCollapsedLibraryModels(new Set(modelLibrary.map(entry => entry.id)));
-        initialLibraryCollapseRef.current = true;
+        setCollapsedLibraryModels(prev => {
+            const next = new Set();
+            const hasStoredState = collapsedLibraryStateLoadedRef.current;
+            modelLibrary.forEach((entry) => {
+                if (prev.has(entry.id)) {
+                    next.add(entry.id);
+                } else if (!hasStoredState) {
+                    // 初次加载时默认全部折叠
+                    next.add(entry.id);
+                }
+            });
+            collapsedLibraryStateLoadedRef.current = true;
+            return next;
+        });
     }, [modelLibrary]);
+
+    useEffect(() => {
+        try {
+            const payload = Array.from(collapsedLibraryModels);
+            localStorage.setItem('tapnow_model_library_collapsed', JSON.stringify(payload));
+        } catch (e) {
+            console.error('保存模型库折叠状态失败:', e);
+        }
+    }, [collapsedLibraryModels]);
 
     const [apiConfigs, setApiConfigs] = useState(() => {
         const saved = localStorage.getItem('tapnow_api_configs');
@@ -3483,6 +3797,20 @@ function TapnowApp() {
             return true;
         }
     });
+    const [cacheRedownloadOnEnable, setCacheRedownloadOnEnable] = useState(() => {
+        try {
+            return localStorage.getItem('tapnow_cache_redownload_on_enable') === 'true';
+        } catch (e) {
+            return false;
+        }
+    });
+    const [saveHistoryAssets, setSaveHistoryAssets] = useState(() => {
+        try {
+            return localStorage.getItem('tapnow_save_history_assets') === 'true';
+        } catch (e) {
+            return false;
+        }
+    });
     const [cacheRefreshTick, setCacheRefreshTick] = useState(0);
     const [localCacheBannerVisible, setLocalCacheBannerVisible] = useState(false);
     const localCacheBannerTimerRef = useRef(null);
@@ -3509,6 +3837,9 @@ function TapnowApp() {
         localStorage.setItem('tapnow_performance_mode', performanceMode);
         localStorage.setItem('tapnow_history_performance_mode', performanceMode);
     }, [performanceMode]);
+    useEffect(() => {
+        localStorage.setItem('tapnow_save_history_assets', String(saveHistoryAssets));
+    }, [saveHistoryAssets]);
 
     useEffect(() => {
         localStorage.setItem('tapnow_global_performance_mode', globalPerformanceMode);
@@ -3520,6 +3851,9 @@ function TapnowApp() {
     useEffect(() => {
         try { localStorage.setItem('tapnow_local_cache_enabled', String(localCacheEnabled)); } catch (e) { }
     }, [localCacheEnabled]);
+    useEffect(() => {
+        try { localStorage.setItem('tapnow_cache_redownload_on_enable', String(cacheRedownloadOnEnable)); } catch (e) { }
+    }, [cacheRedownloadOnEnable]);
 
     const [history, setHistory] = useState(() => {
         try {
@@ -3711,15 +4045,18 @@ function TapnowApp() {
     const [settingsTab, setSettingsTab] = useState('providers');
     const [editingApiModels, setEditingApiModels] = useState(() => new Set());
     const [editingLibraryModels, setEditingLibraryModels] = useState(() => new Set());
-    const [collapsedLibraryModels, setCollapsedLibraryModels] = useState(() => new Set());
     const [libraryPreviewModels, setLibraryPreviewModels] = useState(() => new Set());
     const [libraryPreviewEditing, setLibraryPreviewEditing] = useState(() => new Set());
     const [libraryPreviewDrafts, setLibraryPreviewDrafts] = useState(() => ({}));
+    const [libraryRequestPreviewEditing, setLibraryRequestPreviewEditing] = useState(() => new Set());
+    const [libraryRequestPreviewDrafts, setLibraryRequestPreviewDrafts] = useState(() => ({}));
+    const [libraryRequestTemplateDrafts, setLibraryRequestTemplateDrafts] = useState(() => ({}));
     const [libraryNotesCollapsed, setLibraryNotesCollapsed] = useState(() => ({}));
     const [historyOpen, setHistoryOpen] = useState(false);
     const [historyCachePanelOpen, setHistoryCachePanelOpen] = useState(false);
     const [historyQueuePanelOpen, setHistoryQueuePanelOpen] = useState(false);
     const [historyFocusIndex, setHistoryFocusIndex] = useState(-1); // V3.7.28: 历史列表键盘导航
+    const [historyFocusId, setHistoryFocusId] = useState(null);
     const [charactersOpen, setCharactersOpen] = useState(false);
     const [characterLibrary, setCharacterLibrary] = useState(() => {
         try {
@@ -3967,10 +4304,25 @@ function TapnowApp() {
             }
         }
         let targetUrl = rawUrl;
-        if (preferLocal && historyLocalCacheMap && historyLocalCacheMap.has(rawUrl)) {
-            const cached = historyLocalCacheMap.get(rawUrl);
-            if (cached) targetUrl = cached;
+        const cachedUrl = preferLocal && historyLocalCacheMap && historyLocalCacheMap.has(rawUrl)
+            ? historyLocalCacheMap.get(rawUrl)
+            : null;
+        if (cachedUrl) {
+            try {
+                if (cachedUrl.startsWith('data:')) {
+                    const normalized = normalizeDataUrl(cachedUrl);
+                    const blob = dataUrlToBlob(normalized);
+                    if (blob) return blob;
+                } else if (cachedUrl.startsWith('blob:')) {
+                    return await fetchBlob(cachedUrl);
+                } else {
+                    return await fetchBlob(cachedUrl);
+                }
+            } catch (e) {
+                // 本地缓存不可用时回退到原始URL
+            }
         }
+        targetUrl = rawUrl;
         if (targetUrl.startsWith('data:')) {
             const normalized = normalizeDataUrl(targetUrl);
             const blob = dataUrlToBlob(normalized);
@@ -4274,43 +4626,58 @@ function TapnowApp() {
     }, [localServerUrl, showToast, normalizeLocalPath]);
 
     const refreshLocalCache = useCallback((options = {}) => {
+        const silent = !!options.silent;
+        const reset = options.reset !== false;
         triedCacheIdsRef.current = new Set();
         thumbnailCacheRef.current = new Map();
         localCacheCheckRef.current = new Map();
         cachedHistoryUrlRef.current = new Map();
         cacheFetchFailureRef.current = new Map();
-        setHistory(prev => prev.map(item => ({
-            ...item,
-            localCacheUrl: null,
-            localFilePath: null,
-            localCacheMap: null
-        })));
-        setCharacterLibrary(prev => prev.map(item => ({
-            ...item,
-            localCacheUrl: null,
-            localFilePath: null
-        })));
+        if (reset) {
+            setHistory(prev => prev.map(item => ({
+                ...item,
+                localCacheUrl: null,
+                localFilePath: null,
+                localCacheMap: null
+            })));
+            setCharacterLibrary(prev => prev.map(item => ({
+                ...item,
+                localCacheUrl: null,
+                localFilePath: null
+            })));
+        }
         setCacheRefreshTick(prev => prev + 1);
-        if (!options.silent) {
+        if (!silent) {
             showToast('已触发缓存刷新，将重新写入本地缓存路径', 'success');
         }
-    }, [showToast, localCacheEnabled, localCacheServerConnected, localCacheActive, history.length, localServerConfig.imageSavePath, localServerConfig.videoSavePath]);
+    }, [showToast]);
 
     useEffect(() => {
         if (!localCacheActive) return;
-        refreshLocalCache({ silent: true });
-    }, [localCacheActive, refreshLocalCache]);
+        refreshLocalCache({ silent: true, reset: cacheRedownloadOnEnable });
+    }, [localCacheActive, refreshLocalCache, cacheRedownloadOnEnable]);
 
     const getItemProxyPreference = useCallback((item) => {
         if (typeof item?.useProxy === 'boolean') return item.useProxy;
         if (typeof item?.apiConfig?.useProxy === 'boolean') return item.apiConfig.useProxy;
-        const providerKey = String(item?.provider || item?.apiConfig?.provider || '').trim();
+        let providerKey = String(item?.provider || item?.apiConfig?.provider || '').trim();
+        if (!providerKey) {
+            const modelKey = String(item?.model || item?.modelName || item?.apiConfig?.modelId || '').trim();
+            if (modelKey) {
+                const matched = apiConfigs.find(cfg =>
+                    cfg?.id === modelKey
+                    || cfg?.modelName === modelKey
+                    || cfg?.displayName === modelKey
+                );
+                providerKey = String(matched?.provider || '').trim();
+            }
+        }
         if (!providerKey) return false;
         if (providers[providerKey]?.useProxy) return true;
         const normalizedKey = providerKey.toLowerCase();
         if (normalizedKey && providers[normalizedKey]?.useProxy) return true;
         return false;
-    }, [providers]);
+    }, [providers, apiConfigs]);
 
     const historyLocalCacheMap = useMemo(() => {
         const map = new Map();
@@ -4321,24 +4688,21 @@ function TapnowApp() {
                     if (sourceUrl && cacheUrl) map.set(sourceUrl, cacheUrl);
                 });
             }
-            if (item.url && item.localCacheUrl) {
-                map.set(item.url, item.localCacheUrl);
+            if (item.localCacheUrl) {
+                const primaryUrls = [item.url, item.originalUrl, item.mjOriginalUrl].filter(Boolean);
+                primaryUrls.forEach((url) => map.set(url, item.localCacheUrl));
+                if ((!item.localCacheMap || Object.keys(item.localCacheMap).length === 0)) {
+                    if (Array.isArray(item.mjImages) && item.mjImages.length === 1) {
+                        map.set(item.mjImages[0], item.localCacheUrl);
+                    }
+                    if (Array.isArray(item.output_images) && item.output_images.length === 1) {
+                        map.set(item.output_images[0], item.localCacheUrl);
+                    }
+                }
             }
         });
         return map;
     }, [history]);
-
-    const inferProviderFromUrl = useCallback((rawUrl) => {
-        if (!rawUrl || typeof rawUrl !== 'string') return '';
-        if (!/^https?:/i.test(rawUrl)) return '';
-        try {
-            const host = new URL(rawUrl).hostname.toLowerCase();
-            if (host.includes('modelscope') || host.includes('muse-ai.oss-cn-hangzhou.aliyuncs.com')) return 'modelscope';
-            return '';
-        } catch {
-            return '';
-        }
-    }, []);
 
     const historyUrlProxyMap = useMemo(() => {
         const map = new Map();
@@ -4369,15 +4733,8 @@ function TapnowApp() {
         if (base && raw.startsWith(base)) return false;
         if (localCacheActive && historyLocalCacheMap.has(raw)) return false;
         if (historyUrlProxyMap.has(raw)) return !!historyUrlProxyMap.get(raw);
-        const inferred = inferProviderFromUrl(raw);
-        if (inferred) {
-            if (providers[inferred]?.useProxy) return true;
-            const inferredLower = inferred.toLowerCase();
-            const matchedKey = Object.keys(providers).find(key => key.toLowerCase() === inferredLower);
-            if (matchedKey && providers[matchedKey]?.useProxy) return true;
-        }
         return !!fallback;
-    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, inferProviderFromUrl, providers, localCacheActive]);
+    }, [historyUrlProxyMap, historyLocalCacheMap, localServerUrl, localCacheActive]);
 
     useEffect(() => {
         const nextPath = {
@@ -4392,8 +4749,8 @@ function TapnowApp() {
         localCachePathRef.current = nextPath;
         if (!localCacheEnabled || !changed) return;
         if (!prevPath.savePath && !prevPath.imageSavePath && !prevPath.videoSavePath) return;
-        refreshLocalCache({ silent: true });
-    }, [localServerConfig.savePath, localServerConfig.imageSavePath, localServerConfig.videoSavePath, localCacheEnabled, refreshLocalCache]);
+        refreshLocalCache({ silent: true, reset: cacheRedownloadOnEnable });
+    }, [localServerConfig.savePath, localServerConfig.imageSavePath, localServerConfig.videoSavePath, localCacheEnabled, refreshLocalCache, cacheRedownloadOnEnable]);
 
     const handleHistoryCacheMissing = useCallback((itemId, failedUrl) => {
         if (!itemId) return;
@@ -4434,44 +4791,33 @@ function TapnowApp() {
 
     const resolveHistoryUrl = useCallback((item, specificUrl = null) => {
         if (!item) return '';
-        const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
-        const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
-        const isCacheUrlMismatch = (url) => {
-            if (!url) return false;
-            const text = String(url);
-            if (!text.includes('/file/')) return true;
-            return expectedSegment && !text.includes(expectedSegment);
-        };
         if (specificUrl) {
+            if (localCacheActive && historyLocalCacheMap && historyLocalCacheMap.has(specificUrl)) {
+                const cached = historyLocalCacheMap.get(specificUrl);
+                if (cached) return cached;
+            }
             if (localCacheActive && item.localCacheMap && item.localCacheMap[specificUrl]) {
                 const cached = item.localCacheMap[specificUrl];
-                if (!isCacheUrlMismatch(cached)) return cached;
+                if (cached) return cached;
             }
             return normalizeHistoryUrl(specificUrl);
         }
         const cacheUrl = localCacheActive
             ? (item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null))
             : null;
-        if (cacheUrl && isCacheUrlMismatch(cacheUrl)) {
-            return normalizeHistoryUrl(item.url || item.originalUrl || item.mjOriginalUrl || '');
-        }
         return normalizeHistoryUrl(cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
-    }, [localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath]);
+    }, [localCacheActive, historyLocalCacheMap]);
 
     const resolveHistoryPreviewUrl = useCallback((item, specificUrl = null) => {
         if (!item) return '';
-        const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
-        const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
-        const isCacheUrlMismatch = (url) => {
-            if (!url) return false;
-            const text = String(url);
-            if (!text.includes('/file/')) return true;
-            return expectedSegment && !text.includes(expectedSegment);
-        };
         if (specificUrl) {
+            if (localCacheActive && historyLocalCacheMap && historyLocalCacheMap.has(specificUrl)) {
+                const cached = historyLocalCacheMap.get(specificUrl);
+                if (cached) return cached;
+            }
             if (localCacheActive && item.localCacheMap && item.localCacheMap[specificUrl]) {
                 const cached = item.localCacheMap[specificUrl];
-                if (!isCacheUrlMismatch(cached)) return cached;
+                if (cached) return cached;
             }
             if (performanceMode !== 'off' && item.mjImages && item.mjThumbnails) {
                 const idx = item.mjImages.indexOf(specificUrl);
@@ -4485,16 +4831,10 @@ function TapnowApp() {
             ? (item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null))
             : null;
         if (performanceMode === 'off') {
-            if (cacheUrl && isCacheUrlMismatch(cacheUrl)) {
-                return normalizeHistoryUrl(item.url || item.originalUrl || item.mjOriginalUrl || '');
-            }
             return normalizeHistoryUrl(cacheUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
         }
-        if (cacheUrl && isCacheUrlMismatch(cacheUrl)) {
-            return normalizeHistoryUrl(item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
-        }
         return normalizeHistoryUrl(cacheUrl || item.thumbnailUrl || item.url || item.originalUrl || item.mjOriginalUrl || '');
-    }, [localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, performanceMode]);
+    }, [localCacheActive, performanceMode, historyLocalCacheMap]);
 
     const rebuildHistoryThumbnail = useCallback(async (item, options = {}) => {
         if (!item) return;
@@ -4505,6 +4845,7 @@ function TapnowApp() {
             showToast('没有可用的图片地址', 'warning');
             return;
         }
+        const baseProxy = getItemProxyPreference(item);
         const quality = performanceMode === 'ultra' ? 'ultra' : 'normal';
         rawUrls.forEach(url => {
             if (url) thumbnailCacheRef.current.delete(url);
@@ -4516,20 +4857,20 @@ function TapnowApp() {
             const mjThumbnails = await Promise.all(rawUrls.map(async (url) => {
                 const resolved = resolveHistoryUrl(item, url);
                 if (!resolved) return null;
-                const useProxy = getProxyPreferenceForUrl(resolved, false);
+                const useProxy = getProxyPreferenceForUrl(resolved, baseProxy);
                 return await generateThumbnail(resolved, quality, { useProxy });
             }));
             setHistory(prev => prev.map(h => h.id === item.id ? { ...h, mjThumbnails } : h));
         } else {
             const resolved = resolveHistoryUrl(item, rawUrls[0]);
-            const useProxy = resolved ? getProxyPreferenceForUrl(resolved, false) : false;
+            const useProxy = resolved ? getProxyPreferenceForUrl(resolved, baseProxy) : false;
             const thumbnail = resolved ? await generateThumbnail(resolved, quality, { useProxy }) : null;
             setHistory(prev => prev.map(h => h.id === item.id ? { ...h, thumbnailUrl: thumbnail || null } : h));
         }
         if (!options.silent) {
             showToast('缩略图已更新', 'success');
         }
-    }, [generateThumbnail, performanceMode, resolveHistoryUrl, showToast]);
+    }, [generateThumbnail, performanceMode, resolveHistoryUrl, showToast, getItemProxyPreference, getProxyPreferenceForUrl]);
 
     const rebuildAllHistoryThumbnails = useCallback(async () => {
         const imageItems = history.filter(item =>
@@ -4702,12 +5043,7 @@ function TapnowApp() {
             try {
                 const preferHistoryPath = !!(localServerConfig.imageSavePath || localServerConfig.videoSavePath);
                 const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
-                const isCacheUrlMismatch = (url) => {
-                    if (!url) return false;
-                    const text = String(url);
-                    if (!text.includes('/file/')) return true;
-                    return expectedSegment && !text.includes(expectedSegment);
-                };
+                const localBase = (localServerUrl || '').trim().replace(/\/+$/, '');
 
                 for (const item of history) {
                 const status = item?.status;
@@ -4721,20 +5057,6 @@ function TapnowApp() {
                 let localFilePath = item.localFilePath || null;
                 let cacheMap = item.localCacheMap ? { ...item.localCacheMap } : {};
                 let cacheMapUpdated = false;
-
-                if (localCacheUrl && isCacheUrlMismatch(localCacheUrl)) {
-                    localCacheUrl = null;
-                    localFilePath = null;
-                    cacheMapUpdated = true;
-                }
-                if (cacheMap && Object.keys(cacheMap).length > 0) {
-                    Object.entries(cacheMap).forEach(([sourceUrl, cacheUrl]) => {
-                        if (isCacheUrlMismatch(cacheUrl)) {
-                            delete cacheMap[sourceUrl];
-                            cacheMapUpdated = true;
-                        }
-                    });
-                }
 
                 const firstCacheUrl = localCacheUrl || (Object.keys(cacheMap).length > 0 ? Object.values(cacheMap)[0] : null);
                 if (firstCacheUrl) {
@@ -4783,6 +5105,24 @@ function TapnowApp() {
                 triedCacheIdsRef.current.add(item.id);
                 summary.processed++;
 
+                if (!cacheRedownloadOnEnable && localCacheUrl) {
+                    let updated = false;
+                    imageUrls.forEach((url) => {
+                        if (!url) return;
+                        if (!cacheMap[url]) {
+                            cacheMap[url] = localCacheUrl;
+                            updated = true;
+                        }
+                    });
+                    if (updated || localCacheUrl !== item.localCacheUrl) {
+                        const nextCacheMap = Object.keys(cacheMap).length > 0 ? cacheMap : null;
+                        setHistory(prev => prev.map(h =>
+                            h.id === item.id ? { ...h, localCacheUrl: localCacheUrl || null, localFilePath: localFilePath || null, localCacheMap: nextCacheMap } : h
+                        ));
+                    }
+                    continue;
+                }
+
                 for (let idx = 0; idx < imageUrls.length; idx++) {
                     const imageUrl = imageUrls[idx];
                     if (!imageUrl || imageUrl.startsWith('blob:') || imageUrl.includes('...')) continue;
@@ -4796,19 +5136,63 @@ function TapnowApp() {
                         cacheMapUpdated = true;
                     }
 
-                    if (cachedHistoryUrlRef.current.has(imageUrl)) {
-                        const cachedUrl = cachedHistoryUrlRef.current.get(imageUrl);
-                        if (cachedUrl && (isCacheUrlMismatch(cachedUrl) || (expectedId && !String(cachedUrl).includes(expectedId)))) {
-                            cachedHistoryUrlRef.current.delete(imageUrl);
-                        } else {
-                            if (cachedUrl && !cacheMap[imageUrl]) {
-                                cacheMap[imageUrl] = cachedUrl;
+                    if (!cacheRedownloadOnEnable) {
+                        // 如果全局缓存映射已存在，直接绑定并跳过远程拉取
+                        const globalCached = historyLocalCacheMap && historyLocalCacheMap.get(imageUrl);
+                        if (globalCached) {
+                            if (!cacheMap[imageUrl]) {
+                                cacheMap[imageUrl] = globalCached;
                                 cacheMapUpdated = true;
                             }
-                            if (!localCacheUrl && cachedUrl) {
-                                localCacheUrl = cachedUrl;
+                            if (!localCacheUrl) {
+                                localCacheUrl = globalCached;
                             }
                             continue;
+                        }
+
+                        // 尝试在当前本地缓存目录中按 cacheId 直接命中已有文件，避免重新拉取远端
+                        if (localBase && expectedId) {
+                            const candidates = [
+                                `${localBase}${expectedSegment}${expectedId}.jpg`,
+                                `${localBase}${expectedSegment}${expectedId}.png`,
+                                `${localBase}${expectedSegment}${expectedId}.webp`
+                            ];
+                            let matchedLocal = '';
+                            for (const candidate of candidates) {
+                                try {
+                                    const headRes = await fetch(candidate, { method: 'HEAD' });
+                                    if (headRes.ok) {
+                                        matchedLocal = candidate;
+                                        break;
+                                    }
+                                } catch { }
+                            }
+                            if (matchedLocal) {
+                                if (!cacheMap[imageUrl]) {
+                                    cacheMap[imageUrl] = matchedLocal;
+                                    cacheMapUpdated = true;
+                                }
+                                if (!localCacheUrl) {
+                                    localCacheUrl = matchedLocal;
+                                }
+                                continue;
+                            }
+                        }
+
+                        if (cachedHistoryUrlRef.current.has(imageUrl)) {
+                            const cachedUrl = cachedHistoryUrlRef.current.get(imageUrl);
+                            if (cachedUrl && (expectedId && !String(cachedUrl).includes(expectedId))) {
+                                cachedHistoryUrlRef.current.delete(imageUrl);
+                            } else {
+                                if (cachedUrl && !cacheMap[imageUrl]) {
+                                    cacheMap[imageUrl] = cachedUrl;
+                                    cacheMapUpdated = true;
+                                }
+                                if (!localCacheUrl && cachedUrl) {
+                                    localCacheUrl = cachedUrl;
+                                }
+                                continue;
+                            }
                         }
                     }
 
@@ -4837,7 +5221,7 @@ function TapnowApp() {
                 const primaryUrl = imageUrls[0];
                 if (primaryUrl) {
                     const primaryCacheUrl = cacheMap[primaryUrl] || null;
-                    if (primaryCacheUrl && !isCacheUrlMismatch(primaryCacheUrl)) {
+                    if (primaryCacheUrl) {
                         localCacheUrl = primaryCacheUrl;
                     } else {
                         localCacheUrl = null;
@@ -4860,7 +5244,7 @@ function TapnowApp() {
         cacheHistoryImages();
         const timer = setTimeout(cacheHistoryImages, 3000);
         return () => clearTimeout(timer);
-    }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick]);
+    }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, localServerUrl, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick, historyLocalCacheMap, cacheRedownloadOnEnable]);
 
     // V2.6.1 Feature: 历史记录本地缓存（视频）
     useEffect(() => {
@@ -4881,14 +5265,10 @@ function TapnowApp() {
                 direct: 0
             };
             try {
-                const preferHistoryPath = !!localServerConfig.videoSavePath;
+                const localBase = (localServerUrl || '').trim().replace(/\/+$/, '');
+                const savePathRaw = localServerConfig.videoSavePath || localServerConfig.savePath || '';
+                const preferHistoryPath = !!(savePathRaw && !String(savePathRaw).includes('.tapnow_cache'));
                 const expectedSegment = preferHistoryPath ? '/file/history/' : '/file/.tapnow_cache/history/';
-                const isCacheUrlMismatch = (url) => {
-                    if (!url) return false;
-                    const text = String(url);
-                    if (!text.includes('/file/')) return true;
-                    return expectedSegment && !text.includes(expectedSegment);
-                };
                 for (const item of history) {
                 const status = item?.status;
                 const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
@@ -4897,18 +5277,73 @@ function TapnowApp() {
                 const isVideoItem = item?.type === 'video' || isVideoUrl(videoUrl);
                 if (!isVideoItem) { summary.skippedNonVideo++; continue; }
                 const baseProxy = getItemProxyPreference(item);
-                if (item.localCacheUrl && isCacheUrlMismatch(item.localCacheUrl)) {
-                    setHistory(prev => prev.map(h =>
-                        h.id === item.id ? { ...h, localCacheUrl: null, localFilePath: null } : h
-                    ));
+                let localCacheUrl = item.localCacheUrl || null;
+                if (localCacheUrl && !cacheRedownloadOnEnable) {
+                    const checkKey = `video:${item.id}`;
+                    const now = Date.now();
+                    const lastCheck = localCacheCheckRef.current.get(checkKey) || 0;
+                    if (now - lastCheck > 30000 && !localCacheUrl.startsWith('data:') && !localCacheUrl.startsWith('blob:')) {
+                        localCacheCheckRef.current.set(checkKey, now);
+                        let cacheInvalid = false;
+                        try {
+                            const checkRes = await fetch(localCacheUrl, { method: 'HEAD' });
+                            if (!checkRes.ok) cacheInvalid = true;
+                        } catch (e) {
+                            cacheInvalid = true;
+                        }
+                        if (cacheInvalid) {
+                            localCacheUrl = null;
+                            setHistory(prev => prev.map(h =>
+                                h.id === item.id ? { ...h, localCacheUrl: null, localFilePath: null } : h
+                            ));
+                        }
+                    }
+                    if (localCacheUrl) continue;
                 }
-                if (item.localCacheUrl) continue;
                 if (triedCacheIdsRef.current.has(item.id)) continue;
                 triedCacheIdsRef.current.add(item.id);
                     if (videoUrl && (videoUrl.includes('localhost:') || videoUrl.includes('127.0.0.1:'))) continue;
 
                     if (!videoUrl || videoUrl.startsWith('blob:') || videoUrl.includes('...')) { summary.skippedEmpty++; continue; }
                     summary.processed++;
+
+                    if (!cacheRedownloadOnEnable) {
+                        const globalCached = historyLocalCacheMap && historyLocalCacheMap.get(videoUrl);
+                        if (globalCached) {
+                            setHistory(prev => prev.map(h =>
+                                h.id === item.id ? { ...h, localCacheUrl: globalCached } : h
+                            ));
+                            continue;
+                        }
+
+                        if (localBase) {
+                            const cacheId = getCacheIdFromUrl(videoUrl, item.id);
+                            const expectedId = sanitizeCacheId(cacheId) || cacheId;
+                            if (expectedId) {
+                                const candidates = [
+                                    `${localBase}${expectedSegment}${expectedId}.mp4`,
+                                    `${localBase}${expectedSegment}${expectedId}.webm`,
+                                    `${localBase}${expectedSegment}${expectedId}.mov`
+                                ];
+                                let matchedLocal = '';
+                                for (const candidate of candidates) {
+                                    try {
+                                        const headRes = await fetch(candidate, { method: 'HEAD' });
+                                        if (headRes.ok) {
+                                            matchedLocal = candidate;
+                                            break;
+                                        }
+                                    } catch { }
+                                }
+                                if (matchedLocal) {
+                                    setHistory(prev => prev.map(h =>
+                                        h.id === item.id ? { ...h, localCacheUrl: matchedLocal } : h
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
                     try {
                         const useProxy = getProxyPreferenceForUrl(videoUrl, baseProxy);
@@ -4935,7 +5370,7 @@ function TapnowApp() {
         cacheHistoryVideos();
         const timer = setTimeout(cacheHistoryVideos, 5000);
         return () => clearTimeout(timer);
-    }, [history, localCacheActive, localServerConfig.videoSavePath, saveVideoToLocalCache, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick]);
+    }, [history, localCacheActive, localServerConfig.videoSavePath, localServerConfig.savePath, localServerUrl, saveVideoToLocalCache, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick, historyLocalCacheMap, cacheRedownloadOnEnable, sanitizeCacheId, getCacheIdFromUrl]);
 
     const canvasRef = useRef(null);
     const lastMousePos = useRef({ x: 0, y: 0 });
@@ -5036,6 +5471,12 @@ function TapnowApp() {
         debouncedSaveCharacters(characterLibrary);
     }, [characterLibrary, debouncedSaveCharacters]);
 
+    const historyDisplayItems = useMemo(() => {
+        const sessionItems = history.filter(item => (item.startTime || 0) >= sessionStartTime);
+        const previousItems = history.filter(item => (item.startTime || 0) < sessionStartTime);
+        return [...sessionItems, ...previousItems];
+    }, [history, sessionStartTime]);
+
     // 当视频 URL 改变时清除错误提示
     useEffect(() => {
         setCreateCharacterVideoError(null);
@@ -5045,6 +5486,7 @@ function TapnowApp() {
     useEffect(() => {
         if (!historyOpen) {
             setHistoryFocusIndex(-1);
+            setHistoryFocusId(null);
             return;
         }
 
@@ -5053,41 +5495,42 @@ function TapnowApp() {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
             // 如果 Lightbox 打开则不处理
             if (lightboxItem) return;
+            if (historyDisplayItems.length === 0) return;
+            let currentIndex = historyFocusId
+                ? historyDisplayItems.findIndex(item => item.id === historyFocusId)
+                : historyFocusIndex;
+            if (currentIndex < 0) currentIndex = 0;
 
             if (e.key === 'ArrowUp' || e.key === 'Up') {
                 e.preventDefault();
                 e.stopPropagation();
-                setHistoryFocusIndex(prev => {
-                    const newIdx = prev <= 0 ? history.length - 1 : prev - 1;
-                    // 自动打开预览
-                    const targetItem = history[newIdx];
-                    const displayUrl = resolveHistoryUrl(targetItem);
-                    if (displayUrl) {
-                        setLightboxItem({
-                            ...targetItem,
-                            url: displayUrl,
-                            storyboardContext: null
-                        });
-                    }
-                    return newIdx;
-                });
+                const newIdx = currentIndex <= 0 ? historyDisplayItems.length - 1 : currentIndex - 1;
+                const targetItem = historyDisplayItems[newIdx];
+                const displayUrl = resolveHistoryUrl(targetItem);
+                if (displayUrl) {
+                    setLightboxItem({
+                        ...targetItem,
+                        url: displayUrl,
+                        storyboardContext: null
+                    });
+                }
+                setHistoryFocusId(targetItem?.id || null);
+                setHistoryFocusIndex(newIdx);
             } else if (e.key === 'ArrowDown' || e.key === 'Down') {
                 e.preventDefault();
                 e.stopPropagation();
-                setHistoryFocusIndex(prev => {
-                    const newIdx = prev >= history.length - 1 ? 0 : prev + 1;
-                    // 自动打开预览
-                    const targetItem = history[newIdx];
-                    const displayUrl = resolveHistoryUrl(targetItem);
-                    if (displayUrl) {
-                        setLightboxItem({
-                            ...targetItem,
-                            url: displayUrl,
-                            storyboardContext: null
-                        });
-                    }
-                    return newIdx;
-                });
+                const newIdx = currentIndex >= historyDisplayItems.length - 1 ? 0 : currentIndex + 1;
+                const targetItem = historyDisplayItems[newIdx];
+                const displayUrl = resolveHistoryUrl(targetItem);
+                if (displayUrl) {
+                    setLightboxItem({
+                        ...targetItem,
+                        url: displayUrl,
+                        storyboardContext: null
+                    });
+                }
+                setHistoryFocusId(targetItem?.id || null);
+                setHistoryFocusIndex(newIdx);
             } else if (e.key === 'Escape' || e.key === 'Esc') {
                 e.preventDefault();
                 e.stopPropagation();
@@ -5097,7 +5540,31 @@ function TapnowApp() {
 
         window.addEventListener('keydown', handleHistoryKeyDown);
         return () => window.removeEventListener('keydown', handleHistoryKeyDown);
-    }, [historyOpen, history, lightboxItem, resolveHistoryUrl]);
+    }, [historyOpen, historyDisplayItems, lightboxItem, resolveHistoryUrl, historyFocusId, historyFocusIndex]);
+
+    useEffect(() => {
+        if (!historyOpen) return;
+        if (historyDisplayItems.length === 0) {
+            setHistoryFocusIndex(-1);
+            setHistoryFocusId(null);
+            return;
+        }
+        if (historyFocusId) {
+            const idx = historyDisplayItems.findIndex(item => item.id === historyFocusId);
+            if (idx >= 0 && idx !== historyFocusIndex) {
+                setHistoryFocusIndex(idx);
+            } else if (idx < 0) {
+                setHistoryFocusId(historyDisplayItems[0]?.id || null);
+                setHistoryFocusIndex(0);
+            }
+        } else {
+            const nextIndex = historyFocusIndex >= 0 && historyFocusIndex < historyDisplayItems.length
+                ? historyFocusIndex
+                : 0;
+            setHistoryFocusIndex(nextIndex);
+            setHistoryFocusId(historyDisplayItems[nextIndex]?.id || null);
+        }
+    }, [historyOpen, historyDisplayItems, historyFocusId, historyFocusIndex]);
 
     const MAX_HISTORY_LOCAL_STORAGE = 80;
 
@@ -5105,6 +5572,16 @@ function TapnowApp() {
         if (!url) return url;
         if (url.startsWith('data:') && url.length > 5000) return `${url.substring(0, 100)}...`;
         return url;
+    };
+    const compactCacheMapForStorage = (cacheMap, limit = 8) => {
+        if (!cacheMap || typeof cacheMap !== 'object') return null;
+        const entries = Object.entries(cacheMap).filter(([k, v]) => k && v);
+        if (entries.length === 0) return null;
+        const next = {};
+        entries.slice(0, limit).forEach(([k, v]) => {
+            next[k] = v;
+        });
+        return next;
     };
 
     const compactHistoryItemForStorage = (item) => {
@@ -5119,9 +5596,9 @@ function TapnowApp() {
             saved.mjImages = saved.mjImages.slice(0, 12).map(trimHistoryUrlForStorage);
         }
         delete saved.mjImageInfo;
-        delete saved.localCacheMap;
-        delete saved.localCacheUrl;
-        delete saved.localFilePath;
+        saved.localCacheMap = compactCacheMapForStorage(saved.localCacheMap);
+        saved.localCacheUrl = saved.localCacheUrl || null;
+        saved.localFilePath = saved.localFilePath || null;
         delete saved.apiConfig;
         return saved;
     };
@@ -5270,7 +5747,10 @@ function TapnowApp() {
                 supportsHD: !!entry.supportsHD,
                 customParams: normalizeCustomParams(entry.customParams),
                 previewOverrideEnabled: !!entry.previewOverrideEnabled,
-                previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch)
+                previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
+                requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                requestOverrideEnabled: !!entry.requestOverrideEnabled,
+                requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch)
             });
         });
         return map;
@@ -5304,7 +5784,10 @@ function TapnowApp() {
             supportsHD: resolvedLibrary ? !!resolvedLibrary.supportsHD : !!config.supportsHD,
             customParams: resolvedLibrary ? normalizeCustomParams(resolvedLibrary.customParams) : normalizeCustomParams(config.customParams),
             previewOverrideEnabled: resolvedLibrary ? !!resolvedLibrary.previewOverrideEnabled : !!config.previewOverrideEnabled,
-            previewOverridePatch: normalizePreviewOverridePatch(resolvedLibrary?.previewOverridePatch || config.previewOverridePatch)
+            previewOverridePatch: normalizePreviewOverridePatch(resolvedLibrary?.previewOverridePatch || config.previewOverridePatch),
+            requestTemplate: normalizeRequestTemplate(resolvedLibrary?.requestTemplate || config.requestTemplate),
+            requestOverrideEnabled: resolvedLibrary ? !!resolvedLibrary.requestOverrideEnabled : !!config.requestOverrideEnabled,
+            requestOverridePatch: normalizeRequestOverridePatch(resolvedLibrary?.requestOverridePatch || config.requestOverridePatch)
         };
     }, [modelLibraryMap]);
 
@@ -7035,6 +7518,12 @@ function TapnowApp() {
     // 使用 useMemo 缓存连接图片的计算结果，避免重复计算
     const connectedImagesCache = useMemo(() => {
         const cache = new Map(); // nodeId -> { inputType -> images[] }
+        const resolveConnectedUrl = (url) => {
+            if (!url) return url;
+            if (!localCacheActive || !historyLocalCacheMap) return url;
+            const cached = historyLocalCacheMap.get(url);
+            return cached || url;
+        };
         connections.forEach(conn => {
             const inputType = conn.inputType || 'default';
             if (!cache.has(conn.to)) {
@@ -7053,15 +7542,15 @@ function TapnowApp() {
                         ? sourceNode.selectedKeyframes.map(f => f.url)
                         : [];
                     if (selected.length > 0) {
-                        images = selected;
+                        images = selected.map(resolveConnectedUrl);
                     } else if (sourceNode.frames && sourceNode.frames.length > 0) {
-                        images = [sourceNode.frames[0].url];
+                        images = [resolveConnectedUrl(sourceNode.frames[0].url)];
                     }
                 }
                 // 2. input-image / gen-image / preview: 返回 content 或 mjImages
                 else if (sourceNode.type === 'input-image' || sourceNode.type === 'gen-image' || sourceNode.type === 'preview') {
-                    if (sourceNode.content) images.push(sourceNode.content);
-                    if (sourceNode.previewMjImages) images.push(...sourceNode.previewMjImages);
+                    if (sourceNode.content) images.push(resolveConnectedUrl(sourceNode.content));
+                    if (sourceNode.previewMjImages) images.push(...sourceNode.previewMjImages.map(resolveConnectedUrl));
                 }
                 // 3. storyboard-node: 返回活跃镜头的结果或参考图
                 // V3.7.12: 只输出 outputEnabled=true 且 selectedImageIndex>=0 的镜头
@@ -7081,15 +7570,15 @@ function TapnowApp() {
                             const idx = s.selectedImageIndex ?? -1; // 使用 ?? 避免 0 被视为 falsy
                             // 必须选中才输出 (idx >= 0)
                             if (idx >= 0 && s.output_images && s.output_images.length > 0 && s.output_images[idx]) {
-                                images.push(s.output_images[idx]);
+                                images.push(resolveConnectedUrl(s.output_images[idx]));
                             } else {
                             }
                         }
                         // 视频模式或回退逻辑
                         else if (s.output_url) {
-                            images.push(s.output_url);
+                            images.push(resolveConnectedUrl(s.output_url));
                         } else if (s.image_url) {
-                            images.push(s.image_url);
+                            images.push(resolveConnectedUrl(s.image_url));
                         }
                     });
                 }
@@ -7101,7 +7590,7 @@ function TapnowApp() {
         });
         return cache;
         // V3.7.5: 添加 activeShot 为依赖，确保分镜表切换镜头时缓存失效
-    }, [connections, nodesMap, nodes, activeShot]);
+    }, [connections, nodesMap, nodes, activeShot, localCacheActive, historyLocalCacheMap]);
 
     const getConnectedInputImages = useCallback((targetNodeId, inputType = 'default') => {
         const nodeCache = connectedImagesCache.get(targetNodeId);
@@ -7367,7 +7856,10 @@ function TapnowApp() {
             apiType: 'openai',
             customParams: [],
             previewOverrideEnabled: false,
-            previewOverridePatch: null
+            previewOverridePatch: null,
+            requestTemplate: getDefaultRequestTemplateForType('Image'),
+            requestOverrideEnabled: false,
+            requestOverridePatch: null
         };
         setModelLibrary(prev => [...prev, newEntry]);
         setEditingLibraryModels(prev => {
@@ -7473,6 +7965,22 @@ function TapnowApp() {
             const { [id]: _removed, ...rest } = prev;
             return rest;
         });
+        setLibraryRequestPreviewEditing(prev => {
+            if (!prev.has(id)) return prev;
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+        });
+        setLibraryRequestPreviewDrafts(prev => {
+            if (!prev[id]) return prev;
+            const { [id]: _removed, ...rest } = prev;
+            return rest;
+        });
+        setLibraryRequestTemplateDrafts(prev => {
+            if (!prev[id]) return prev;
+            const { [id]: _removed, ...rest } = prev;
+            return rest;
+        });
     };
 
     const setApiModelEditing = useCallback((uid, enabled) => {
@@ -7530,6 +8038,17 @@ function TapnowApp() {
             return next;
         });
         setLibraryPreviewDrafts(prev => {
+            if (!prev[id]) return prev;
+            const { [id]: _removed, ...rest } = prev;
+            return rest;
+        });
+        setLibraryRequestPreviewEditing(prev => {
+            if (!prev.has(id)) return prev;
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+        });
+        setLibraryRequestPreviewDrafts(prev => {
             if (!prev[id]) return prev;
             const { [id]: _removed, ...rest } = prev;
             return rest;
@@ -7975,6 +8494,9 @@ function TapnowApp() {
                 const now = Date.now();
                 const primaryUrl = chatImageUrls[0];
                 const displayName = config?.displayName || modelName || chatModel;
+                const useProxy = typeof config?.useProxy === 'boolean'
+                    ? config.useProxy
+                    : !!(config?.provider && providers?.[config.provider]?.useProxy);
                 setHistory((prev) => [{
                     id: `chat-${now}-${Math.random().toString(36).slice(2, 8)}`,
                     type: 'image',
@@ -7984,8 +8506,9 @@ function TapnowApp() {
                     status: 'completed',
                     progress: 100,
                     modelName: displayName,
-                    apiConfig: { modelId: chatModel, baseUrl, apiKey },
+                    apiConfig: { modelId: chatModel, baseUrl, apiKey, provider: config?.provider, useProxy },
                     provider: config?.provider,
+                    useProxy,
                     startTime: now,
                     durationMs: 0,
                     output_images: chatImageUrls,
@@ -8579,6 +9102,22 @@ function TapnowApp() {
         }
     };
 
+    const resolveHistoryPayloadUrl = useCallback((payload, specificUrl = null) => {
+        if (!payload) return '';
+        const rawUrl = specificUrl || payload.url || payload.originalUrl || payload.mjOriginalUrl || '';
+        if (!rawUrl) return '';
+        const historyItem = payload.itemId ? historyMap.get(payload.itemId) : null;
+        if (historyItem) return resolveHistoryUrl(historyItem, rawUrl);
+        return rawUrl;
+    }, [historyMap, resolveHistoryUrl]);
+
+    const resolveHistoryPayloadImages = useCallback((payload) => {
+        if (!payload || !Array.isArray(payload.mjImages) || payload.mjImages.length === 0) return null;
+        const historyItem = payload.itemId ? historyMap.get(payload.itemId) : null;
+        if (!historyItem) return payload.mjImages;
+        return payload.mjImages.map((url) => resolveHistoryUrl(historyItem, url));
+    }, [historyMap, resolveHistoryUrl]);
+
     const getDragUrlCandidate = (e) => {
         const uriList = e.dataTransfer.getData('text/uri-list') || '';
         const uriCandidate = uriList.split('\n').find(line => line && !line.startsWith('#')) || '';
@@ -8596,7 +9135,7 @@ function TapnowApp() {
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            const dragUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
             if (dragUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
                 let dimensions = null;
@@ -8688,11 +9227,12 @@ function TapnowApp() {
         let previewType = 'image';
 
         if (payload) {
-            dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            dragUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
             if (payload.mjImages && payload.mjImages.length > 1) {
-                previewImages = payload.mjImages;
+                previewImages = resolveHistoryPayloadImages(payload);
                 const selectedIndex = payload.selectedIndex ?? 0;
-                dragUrl = payload.mjImages[selectedIndex] || payload.mjImages[0] || dragUrl;
+                const candidate = previewImages && previewImages[selectedIndex] ? previewImages[selectedIndex] : (previewImages ? previewImages[0] : '');
+                dragUrl = candidate || dragUrl;
             }
             if (payload.type === 'video' || isVideoUrl(dragUrl)) previewType = 'video';
         }
@@ -8728,7 +9268,7 @@ function TapnowApp() {
         let dragUrl = '';
         let isVideo = false;
         if (payload) {
-            dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            dragUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
             isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
         }
         if (!dragUrl) {
@@ -8760,7 +9300,7 @@ function TapnowApp() {
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const resolvedUrl = normalizeHistoryVideoUrl(resolveHistoryUrl(payload, payload.url || payload.originalUrl || payload.mjOriginalUrl || null), payload.type);
+            const resolvedUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
             if (resolvedUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(resolvedUrl);
                 const isImage = !isVideo;
@@ -10706,8 +11246,22 @@ function TapnowApp() {
         // 优先使用 options 中的 duration，其次使用节点设置，最后使用默认值
         let duration = options.duration ? String(options.duration).replace('s', '') : (node?.settings?.duration?.replace('s', '') || '5');
         if (modelId.includes('veo')) duration = '8';
-        if (modelId.includes('jimeng') && !['5', '10'].includes(String(duration))) {
-            duration = '5';
+        if (type === 'video') {
+            const durationConfig = getApiConfigByKey(modelId);
+            const rawDurationOptions = Array.isArray(durationConfig?.durations) ? durationConfig.durations : null;
+            const normalizedDurationOptions = rawDurationOptions
+                ? rawDurationOptions.map((d) => String(d || '').replace(/[^\d]/g, '')).filter(Boolean)
+                : null;
+            const isJimengVideoModel = durationConfig?.provider === 'jimeng' || modelId.includes('jimeng') || (durationConfig?.modelName ?? '').includes('jimeng');
+            const isJimengSora2Model = isJimengVideoModel && (modelId.includes('sora2') || (durationConfig?.modelName ?? '').includes('sora2'));
+            if (isJimengVideoModel) {
+                const allowed = (normalizedDurationOptions && normalizedDurationOptions.length > 0)
+                    ? normalizedDurationOptions
+                    : (isJimengSora2Model ? ['4', '8', '12'] : ['5', '10']);
+                if (!allowed.includes(String(duration))) {
+                    duration = allowed[0] || duration;
+                }
+            }
         }
 
         // V3.7.27: 确保 taskId 唯一性（避免同一毫秒内多个任务冲突）
@@ -10724,6 +11278,7 @@ function TapnowApp() {
 
         const now = Date.now();
         const actualSourceNodeId = node?.id || nodeId || null;
+        const useProxy = !!credentials.useProxy;
 
         // V3.5.31: Skip history creation on retry to prevent duplicate tasks
         if (!options._isRetry) {
@@ -10733,8 +11288,9 @@ function TapnowApp() {
                 time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                 status: 'generating', progress: 5, modelName: getModelDisplayName(), width: w, height: h,
                 remoteTaskId: null,
-                apiConfig: { modelId, baseUrl, apiKey },
+                apiConfig: { modelId, baseUrl, apiKey, provider: credentials.provider, useProxy },
                 provider: credentials.provider,
+                useProxy,
                 sourceNodeId: actualSourceNodeId,
                 startTime: now,
                 durationMs: null,
@@ -10790,6 +11346,9 @@ function TapnowApp() {
                 const apiType = credentials.apiType || providers[providerKey]?.apiType || 'openai';
                 const useProxy = !!credentials.useProxy;
                 const forceAsync = !!credentials.forceAsync;
+                const requestTemplate = normalizeRequestTemplate(config?.requestTemplate);
+                const requestOverrideEnabled = !!config?.requestOverrideEnabled;
+                const requestOverridePatch = normalizeRequestOverridePatch(config?.requestOverridePatch);
                 const isModelScope = apiType === 'modelscope';
                 const isGeminiNative = apiType === 'gemini';
                 const isChatImage = config?.type === 'ChatImage';
@@ -11222,36 +11781,153 @@ function TapnowApp() {
                     payload = applyPreviewOverridePatch(payload, config.previewOverridePatch);
                 }
 
+                let requestOverride = null;
+                if (requestTemplate?.enabled) {
+                    const buildRequestTemplateVars = async () => {
+                        const vars = {
+                            modelName: config?.modelName || modelId,
+                            prompt: prompt || '',
+                            ratio,
+                            resolution,
+                            size: sizeStr,
+                            duration: type === 'video' ? duration : undefined,
+                            durationNumber: normalizeDurationValue(duration, 5),
+                            seed: node?.settings?.seed,
+                            n: 1,
+                            provider: {
+                                key: apiKey,
+                                baseUrl,
+                                id: credentials.provider,
+                                useProxy
+                            }
+                        };
+                        const inputImages = connectedImages.length > 0
+                            ? connectedImages
+                            : (sourceImage ? [sourceImage] : []);
+                        const imageSources = inputImages.filter(Boolean);
+                        if (imageSources.length > 0) {
+                            vars.imageUrl = imageSources[0];
+                            vars.imageUrls = imageSources;
+                            vars.imagesUrl = imageSources;
+                            vars.imagesUrls = imageSources;
+                        }
+                        if (finalMaskBlob) {
+                            vars.maskBlob = finalMaskBlob;
+                            try {
+                                vars.maskDataUrl = await blobToDataURL(finalMaskBlob);
+                                vars.maskDataURL = vars.maskDataUrl;
+                            } catch (e) { }
+                        }
+                        const templateText = JSON.stringify(requestTemplate || {});
+                        const needsBlob = (requestTemplate?.bodyType || '').toLowerCase() === 'multipart'
+                            || /:blob\s*}}/.test(templateText);
+                        const needsDataUrl = /:blob\s*}}/.test(templateText);
+                        if (needsBlob && imageSources.length > 0) {
+                            const blobs = await Promise.all(imageSources.map((url) => getBlobFromUrl(url, { useProxy: resolveSourceProxy(url) })));
+                            vars.imageBlob = blobs[0];
+                            vars.imageBlobs = blobs;
+                            vars.imagesBlob = blobs;
+                        }
+                        if (needsDataUrl && imageSources.length > 0) {
+                            const dataUrls = await Promise.all(imageSources.map(async (url) => {
+                                if (!url) return '';
+                                if (url.startsWith('data:')) return url;
+                                const base64 = await getBase64FromUrl(url, { useProxy: resolveSourceProxy(url) });
+                                const ext = getUrlExt(url, '.png');
+                                const mime = ext === '.jpg' || ext === '.jpeg'
+                                    ? 'image/jpeg'
+                                    : ext === '.webp'
+                                        ? 'image/webp'
+                                        : 'image/png';
+                                return `data:${mime};base64,${base64}`;
+                            }));
+                            vars.imageDataUrl = dataUrls[0];
+                            vars.imageDataURL = dataUrls[0];
+                            vars.imageDataUrls = dataUrls;
+                            vars.imagesDataUrl = dataUrls;
+                            vars.imagesDataURL = dataUrls;
+                        }
+                        if (customParams.length > 0 && customParamSelections) {
+                            customParams.forEach((param) => {
+                                const name = String(param?.name || '').trim();
+                                if (!name) return;
+                                const value = getCustomParamSelection(param, customParamSelections);
+                                if (value === '' || value === undefined || value === null) return;
+                                vars[name] = value;
+                            });
+                        }
+                        return vars;
+                    };
+                    try {
+                        const templateVars = await buildRequestTemplateVars();
+                        const templateRequest = buildRequestFromTemplate(requestTemplate, templateVars, { bodyType: requestTemplate.bodyType });
+                        if (templateRequest && templateRequest.url) {
+                            requestOverride = requestOverrideEnabled && requestOverridePatch
+                                ? applyRequestOverridePatch({ ...templateRequest }, requestOverridePatch)
+                                : templateRequest;
+                        }
+                    } catch (e) {
+                        console.warn('[RequestTemplate] 构建失败，已回退默认请求:', e);
+                        requestOverride = null;
+                    }
+                }
+
                 // --- 发送请求逻辑 (通用) (Supports Failover) ---
                 // --- 发送请求逻辑 (通用) (Supports Failover) ---
 
                 // Helper to perform fetch
                 const performFetch = async (currentApiKey, currentBaseUrl) => {
-                    const headers = useMultipart
-                        ? { Authorization: `Bearer ${currentApiKey} ` }
-                        : { Authorization: `Bearer ${currentApiKey} `, 'Content-Type': 'application/json' };
+                    const overrideUrl = requestOverride?.url || endpoint;
+                    const overrideMethod = (requestOverride?.method || 'POST').toString().toUpperCase();
+                    let overrideBodyType = (requestOverride?.bodyType || (useMultipart ? 'multipart' : 'json')).toString().toLowerCase();
+                    const overrideHeaders = requestOverride?.headers && typeof requestOverride.headers === 'object'
+                        ? { ...requestOverride.headers }
+                        : {};
+                    let requestBody = requestOverride && requestOverride.body !== undefined ? requestOverride.body : payload;
+                    if (requestBody instanceof FormData) {
+                        overrideBodyType = 'multipart';
+                    }
+
+                    if (currentApiKey && !overrideHeaders.Authorization && !overrideHeaders.authorization) {
+                        overrideHeaders.Authorization = `Bearer ${currentApiKey} `;
+                    }
+                    if (overrideBodyType === 'json' && !overrideHeaders['Content-Type'] && !overrideHeaders['content-type']) {
+                        overrideHeaders['Content-Type'] = 'application/json';
+                    }
                     if (isModelScope && useProxy && useAsync) {
-                        headers['X-ModelScope-Async-Mode'] = 'true';
+                        overrideHeaders['X-ModelScope-Async-Mode'] = 'true';
                     }
 
                     let fullUrl;
-                    if (endpoint.startsWith('http')) {
-                        if (currentBaseUrl !== baseUrl && endpoint.includes(baseUrl)) {
-                            fullUrl = endpoint.replace(baseUrl, currentBaseUrl);
+                    if (overrideUrl.startsWith('http')) {
+                        if (currentBaseUrl !== baseUrl && overrideUrl.includes(baseUrl)) {
+                            fullUrl = overrideUrl.replace(baseUrl, currentBaseUrl);
                         } else {
-                            fullUrl = endpoint;
+                            fullUrl = overrideUrl;
                         }
                     } else {
                         const cleanBaseUrl = currentBaseUrl.replace(/\/+$/, '');
-                        fullUrl = `${cleanBaseUrl}${endpoint.startsWith('/') ? endpoint : '/' + endpoint} `;
+                        fullUrl = `${cleanBaseUrl}${overrideUrl.startsWith('/') ? overrideUrl : '/' + overrideUrl} `;
                     }
 
-                    const requestBody = useMultipart ? payload : JSON.stringify(payload);
+                    if (overrideBodyType === 'multipart') {
+                        requestBody = coerceFormDataFromObject(requestBody);
+                        delete overrideHeaders['Content-Type'];
+                        delete overrideHeaders['content-type'];
+                    } else if (overrideBodyType === 'raw') {
+                        if (typeof requestBody !== 'string') {
+                            requestBody = JSON.stringify(requestBody ?? {});
+                        }
+                    } else if (overrideBodyType === 'json') {
+                        if (!(requestBody instanceof FormData) && typeof requestBody !== 'string') {
+                            requestBody = JSON.stringify(requestBody ?? {});
+                        }
+                    }
 
                     const finalUrl = buildProxyUrl(fullUrl, providerKey);
                     return await fetch(finalUrl, {
-                        method: 'POST',
-                        headers: headers,
+                        method: overrideMethod,
+                        headers: overrideHeaders,
                         body: requestBody,
                     });
                 };
@@ -11679,7 +12355,20 @@ function TapnowApp() {
                 // V3.4.20: Explicitly define config for video generation block
                 const config = getApiConfigByKey(modelId);
                 const customParams = Array.isArray(config?.customParams) ? config.customParams : [];
+                const providerKey = config?.provider || credentials.provider;
+                const modelName = config?.modelName || '';
+                const isJimengVideo = providerKey === 'jimeng'
+                    || modelId.includes('jimeng')
+                    || modelName.includes('jimeng')
+                    || modelId.includes('dreamina')
+                    || modelName.includes('dreamina');
+                const isJimengSora2 = isJimengVideo && (modelId.includes('sora2') || modelName.includes('sora2'));
+                const isOpenAISora = !isJimengVideo && (modelId.includes('sora') || modelName.includes('sora'));
+                const isGrokVideo = providerKey === 'grok' || modelId.includes('grok') || modelName.includes('grok');
                 const useProxy = !!credentials.useProxy;
+                const requestTemplate = normalizeRequestTemplate(config?.requestTemplate);
+                const requestOverrideEnabled = !!config?.requestOverrideEnabled;
+                const requestOverridePatch = normalizeRequestOverridePatch(config?.requestOverridePatch);
                 const resolveSourceProxy = (url) => getProxyPreferenceForUrl(url, useProxy);
                 const applyVideoCustomParams = (payload) => {
                     const updated = applyCustomParamsToPayload(payload, customParams, customParamSelections);
@@ -11690,7 +12379,7 @@ function TapnowApp() {
                 };
                 // Veo 3.x 图生视频：按 /v2/videos/generations 规范发送 JSON，使用 images 数组而不是 input_image
                 if (modelId.includes('veo')) {
-                    const endpoint = `${baseUrl} /v2/videos / generations`;
+                    const endpoint = `${baseUrl}/v2/videos/generations`;
 
                     // 根据文档：images 支持 url 或 base64
                     // 对于Veo接口，如果图片过大，自动缩放到合理尺寸（1920x1080等）
@@ -11741,12 +12430,12 @@ function TapnowApp() {
                                         return trimmedImg;
                                     } else if (trimmedImg.startsWith('blob:')) {
                                         const base64 = await getBase64FromUrl(trimmedImg, { useProxy: resolveSourceProxy(trimmedImg) });
-                                        return `data:image/png;base64, ${base64} `;
+                                        return `data:image/png;base64,${base64}`;
                                     } else if (trimmedImg.length > 100 && !trimmedImg.includes('://') && !trimmedImg.startsWith('data:')) {
-                                        return `data:image/png;base64, ${trimmedImg} `;
+                                        return `data:image/png;base64,${trimmedImg}`;
                                     } else {
                                         const base64 = await getBase64FromUrl(trimmedImg, { useProxy: resolveSourceProxy(trimmedImg) });
-                                        return `data:image/png;base64, ${base64} `;
+                                        return `data:image/png;base64,${base64}`;
                                     }
                                 } catch (e) {
                                     console.error('Veo: Failed to process image:', e);
@@ -11773,13 +12462,13 @@ function TapnowApp() {
                                     images = [trimmedSource];
                                 } else if (trimmedSource.startsWith('blob:')) {
                                     const base64 = await getBase64FromUrl(trimmedSource, { useProxy: resolveSourceProxy(trimmedSource) });
-                                    images = [`data:image/png;base64, ${base64} `];
+                                    images = [`data:image/png;base64,${base64}`];
                                 } else {
                                     if (trimmedSource.length > 100 && !trimmedSource.includes('://') && !trimmedSource.startsWith('data:')) {
-                                        images = [`data:image/png;base64, ${trimmedSource} `];
+                                        images = [`data:image/png;base64,${trimmedSource}`];
                                     } else {
                                         const base64 = await getBase64FromUrl(trimmedSource, { useProxy: resolveSourceProxy(trimmedSource) });
-                                        images = [`data:image/png;base64, ${base64} `];
+                                        images = [`data:image/png;base64,${base64}`];
                                     }
                                 }
                             }
@@ -11907,8 +12596,8 @@ function TapnowApp() {
                 })();
 
                 // --- Grok-3 Video Logic (Pure JSON Strategy to fix Int type error, align spec /v2/videos/generations) ---
-                if (modelId.includes('grok')) {
-                    const endpoint = `${baseUrl} /v2/videos / generations`;
+                if (isGrokVideo) {
+                    const endpoint = `${baseUrl}/v2/videos/generations`;
                     // 1. 强制转换为整数 (解决 Go 后端类型错误)
                     const durationInt = parseInt(duration, 10);
                     const aspectRatioStr = ratio && ratio !== 'Auto' ? ratio : '3:2'; // 按官方枚举优先 3:2/2:3/1:1
@@ -11995,12 +12684,54 @@ function TapnowApp() {
                 }
 
                 // Generic Video Logic (Sora/Kling/etc) - Force Multipart for Image Input with correct field names
-                if (sourceImage) {
+                if (isJimengVideo) {
+                    endpoint = `${baseUrl}/v1/videos/generations`;
+                    const formData = new FormData();
+                    const allowedDurations = Array.isArray(config?.durations)
+                        ? config.durations.map((d) => normalizeDurationValue(d, durationValueNum)).filter((d) => Number.isFinite(d))
+                        : (isJimengSora2 ? [4, 8, 12] : [5, 10]);
+                    const baseDuration = normalizeJimengVideoDuration(durationValueNum, allowedDurations);
+                    const jimengRatio = normalizeJimengVideoRatio(ratio);
+                    const modelKey = config?.modelName || modelId || 'jimeng-video-3.0';
+                    const supportsResolution = supportsJimengVideoResolution(modelKey);
+                    const jimengResolution = supportsResolution ? normalizeJimengVideoResolution(resolution) : '';
+
+                    formData.append('model', modelKey);
+                    formData.append('prompt', prompt);
+                    formData.append('duration', String(baseDuration));
+                    formData.append('ratio', jimengRatio);
+                    if (supportsResolution && jimengResolution) formData.append('resolution', jimengResolution);
+
+                    const jimengImages = connectedImages.filter(Boolean).slice(0, 2);
+                    if (jimengImages.length > 0) {
+                        const jimengBlobs = await Promise.all(jimengImages.map((img) => getBlobFromUrl(img, { useProxy: resolveSourceProxy(img) })));
+                        if (jimengBlobs[0]) formData.append('image_file_1', jimengBlobs[0], 'first.png');
+                        if (jimengBlobs[1]) formData.append('image_file_2', jimengBlobs[1], 'last.png');
+                    }
+
+                    applyVideoCustomParams(formData);
+
+                    const durationOverride = normalizeJimengVideoDuration(formData.get('duration'), allowedDurations);
+                    if (durationOverride) formData.set('duration', String(durationOverride));
+
+                    const ratioOverride = normalizeJimengVideoRatio(formData.get('ratio') || jimengRatio || '1:1');
+                    formData.set('ratio', ratioOverride);
+
+                    const resolutionOverride = supportsResolution
+                        ? normalizeJimengVideoResolution(formData.get('resolution') || jimengResolution)
+                        : '';
+                    if (supportsResolution && resolutionOverride) {
+                        formData.set('resolution', resolutionOverride);
+                    } else {
+                        formData.delete('resolution');
+                    }
+                    body = formData;
+                } else if (sourceImage) {
                     const formData = new FormData();
                     const blob = await getBlobFromUrl(sourceImage, { useProxy: resolveSourceProxy(sourceImage) });
 
-                    if (modelId.includes('sora')) {
-                        endpoint = `${baseUrl} /v1/videos`;
+                    if (isOpenAISora) {
+                        endpoint = `${baseUrl}/v1/videos/generations`;
                         // 发送前移除大括号：将 @{username} 转换为 @username
                         let finalPrompt = prompt.replace(/@\{([^\}]+)\}/g, (match, username) => {
                             return `@${username} `;
@@ -12010,35 +12741,21 @@ function TapnowApp() {
                         formData.append('seconds', duration);
                         formData.append('size', sizeStr);
                         // Sora 2 HD 模式支持
-                        if (modelId.includes('sora') && config?.supportsHD && (options.isHD || node?.settings?.isHD)) {
+                        if (config?.supportsHD && (options.isHD || node?.settings?.isHD)) {
                             formData.append('quality', 'hd');
                         }
                         // Sora sometimes uses input_reference or image, append both for safety
                         formData.append('input_reference', blob, 'ref.png');
                         formData.append('image', blob, 'ref.png');
-                    } else if (modelId.includes('jimeng')) {
+                    } else if (isGrokVideo) {
                         endpoint = `${baseUrl}/v1/videos/generations`;
-                        // V3.5.37: Add missing model parameter for Jimeng
-                        formData.append('model', config?.modelName || modelId || 'jimeng-video-3.0');
-                        formData.append('prompt', prompt);
-                        formData.append('duration', parseInt(duration));
-                        const jimengRatio = ratio === 'Auto' ? '1:1' : ratio;
-                        formData.append('ratio', jimengRatio);
-                        const jimengResolution = normalizeVideoResolutionLower(resolution);
-                        if (jimengResolution) formData.append('resolution', jimengResolution);
-                        const jimengImages = connectedImages.filter(Boolean).slice(0, 2);
-                        const jimengBlobs = await Promise.all(jimengImages.map((img) => getBlobFromUrl(img, { useProxy: resolveSourceProxy(img) })));
-                        if (jimengBlobs[0]) formData.append('image_file_1', jimengBlobs[0], 'first.png');
-                        if (jimengBlobs[1]) formData.append('image_file_2', jimengBlobs[1], 'last.png');
-                    } else if (modelId.includes('grok')) {
-                        endpoint = `${baseUrl} /v1/videos`;
                         formData.append('model', config?.modelName || 'grok-video-3');
                         formData.append('prompt', prompt);
                         formData.append('aspect_ratio', ratio);
                         formData.append('duration', durationValueNum);
                         formData.append('image', blob, 'input.png');
                     } else {
-                        endpoint = `${baseUrl} /v1/videos`;
+                        endpoint = `${baseUrl}/v1/videos/generations`;
                         formData.append('model', config?.modelName);
                         formData.append('prompt', prompt);
                         formData.append('image', blob, 'input.png');
@@ -12048,9 +12765,9 @@ function TapnowApp() {
                     body = formData;
                 } else {
                     headers['Content-Type'] = 'application/json';
-                    if (modelId.includes('sora')) {
+                    if (isOpenAISora) {
                         delete headers['Content-Type'];
-                        endpoint = `${baseUrl} /v1/videos`;
+                        endpoint = `${baseUrl}/v1/videos/generations`;
                         const formData = new FormData();
                         // 发送前移除大括号：将 @{username} 转换为 @username
                         let finalPrompt = prompt.replace(/@\{([^\}]+)\}/g, (match, username) => {
@@ -12061,27 +12778,13 @@ function TapnowApp() {
                         formData.append('seconds', duration);
                         formData.append('size', sizeStr);
                         // Sora 2 HD 模式支持
-                        if (modelId.includes('sora') && config?.supportsHD && (options.isHD || node?.settings?.isHD)) {
+                        if (config?.supportsHD && (options.isHD || node?.settings?.isHD)) {
                             formData.append('quality', 'hd');
                         }
                         applyVideoCustomParams(formData);
                         body = formData;
-                    } else if (modelId.includes('jimeng')) {
+                    } else if (isGrokVideo) {
                         endpoint = `${baseUrl}/v1/videos/generations`;
-                        // V3.5.37: Add missing model parameter for Jimeng
-                        const jimengRatio = ratio === 'Auto' ? '1:1' : ratio;
-                        const jimengResolution = normalizeVideoResolutionLower(resolution);
-                        const payload = {
-                            model: config?.modelName || modelId || 'jimeng-video-3.0',
-                            prompt,
-                            duration: parseInt(duration),
-                            ratio: jimengRatio
-                        };
-                        if (jimengResolution) payload.resolution = jimengResolution;
-                        applyVideoCustomParams(payload);
-                        body = JSON.stringify(payload);
-                    } else if (modelId.includes('grok')) {
-                        endpoint = `${baseUrl} /v1/videos`;
                         const payload = {
                             model: config?.modelName || 'grok-video-3',
                             prompt,
@@ -12091,14 +12794,134 @@ function TapnowApp() {
                         applyVideoCustomParams(payload);
                         body = JSON.stringify(payload);
                     } else {
-                        endpoint = `${baseUrl} /minimax/v1 / video_generation`;
+                        endpoint = `${baseUrl}/v1/videos/generations`;
                         const payload = { model: config?.modelName, prompt, resolution: sizeStr };
                         applyVideoCustomParams(payload);
                         body = JSON.stringify(payload);
                     }
                 }
 
-                const resp = await fetch(endpoint, { method: 'POST', headers: body instanceof FormData ? { Authorization: headers.Authorization } : headers, body });
+                let requestOverride = null;
+                if (requestTemplate?.enabled) {
+                    const buildRequestTemplateVars = async () => {
+                        const vars = {
+                            modelName: config?.modelName || modelId,
+                            prompt: prompt || '',
+                            ratio,
+                            resolution,
+                            size: sizeStr,
+                            duration: durationValueNum,
+                            durationNumber: durationValueNum,
+                            seed: node?.settings?.seed,
+                            provider: {
+                                key: apiKey,
+                                baseUrl,
+                                id: credentials.provider,
+                                useProxy
+                            }
+                        };
+                        const inputImages = connectedImages.length > 0
+                            ? connectedImages
+                            : (sourceImage ? [sourceImage] : []);
+                        const imageSources = inputImages.filter(Boolean);
+                        if (imageSources.length > 0) {
+                            vars.imageUrl = imageSources[0];
+                            vars.imageUrls = imageSources;
+                            vars.imagesUrl = imageSources;
+                            vars.imagesUrls = imageSources;
+                        }
+                        const templateText = JSON.stringify(requestTemplate || {});
+                        const needsBlob = (requestTemplate?.bodyType || '').toLowerCase() === 'multipart'
+                            || /:blob\s*}}/.test(templateText);
+                        const needsDataUrl = /:blob\s*}}/.test(templateText);
+                        if (needsBlob && imageSources.length > 0) {
+                            const blobs = await Promise.all(imageSources.map((url) => getBlobFromUrl(url, { useProxy: resolveSourceProxy(url) })));
+                            vars.imageBlob = blobs[0];
+                            vars.imageBlobs = blobs;
+                            vars.imagesBlob = blobs;
+                        }
+                        if (needsDataUrl && imageSources.length > 0) {
+                            const dataUrls = await Promise.all(imageSources.map(async (url) => {
+                                if (!url) return '';
+                                if (url.startsWith('data:')) return url;
+                                const base64 = await getBase64FromUrl(url, { useProxy: resolveSourceProxy(url) });
+                                const ext = getUrlExt(url, '.png');
+                                const mime = ext === '.jpg' || ext === '.jpeg'
+                                    ? 'image/jpeg'
+                                    : ext === '.webp'
+                                        ? 'image/webp'
+                                        : 'image/png';
+                                return `data:${mime};base64,${base64}`;
+                            }));
+                            vars.imageDataUrl = dataUrls[0];
+                            vars.imageDataURL = dataUrls[0];
+                            vars.imageDataUrls = dataUrls;
+                            vars.imagesDataUrl = dataUrls;
+                            vars.imagesDataURL = dataUrls;
+                        }
+                        if (customParams.length > 0 && customParamSelections) {
+                            customParams.forEach((param) => {
+                                const name = String(param?.name || '').trim();
+                                if (!name) return;
+                                const value = getCustomParamSelection(param, customParamSelections);
+                                if (value === '' || value === undefined || value === null) return;
+                                vars[name] = value;
+                            });
+                        }
+                        return vars;
+                    };
+                    try {
+                        const templateVars = await buildRequestTemplateVars();
+                        const templateRequest = buildRequestFromTemplate(requestTemplate, templateVars, { bodyType: requestTemplate.bodyType });
+                        if (templateRequest && templateRequest.url) {
+                            requestOverride = requestOverrideEnabled && requestOverridePatch
+                                ? applyRequestOverridePatch({ ...templateRequest }, requestOverridePatch)
+                                : templateRequest;
+                        }
+                    } catch (e) {
+                        console.warn('[RequestTemplate] 构建失败，已回退默认请求:', e);
+                        requestOverride = null;
+                    }
+                }
+
+                const overrideUrl = requestOverride?.url || endpoint;
+                const overrideMethod = (requestOverride?.method || 'POST').toString().toUpperCase();
+                let overrideBodyType = (requestOverride?.bodyType || (body instanceof FormData ? 'multipart' : 'json')).toString().toLowerCase();
+                const overrideHeaders = requestOverride?.headers && typeof requestOverride.headers === 'object'
+                    ? { ...requestOverride.headers }
+                    : { ...headers };
+                let requestBody = requestOverride && requestOverride.body !== undefined ? requestOverride.body : body;
+                if (requestBody instanceof FormData) {
+                    overrideBodyType = 'multipart';
+                }
+
+                if (apiKey && !overrideHeaders.Authorization && !overrideHeaders.authorization) {
+                    overrideHeaders.Authorization = `Bearer ${apiKey} `;
+                }
+                if (overrideBodyType === 'json' && !overrideHeaders['Content-Type'] && !overrideHeaders['content-type']) {
+                    overrideHeaders['Content-Type'] = 'application/json';
+                }
+                if (overrideBodyType === 'multipart') {
+                    requestBody = coerceFormDataFromObject(requestBody);
+                    delete overrideHeaders['Content-Type'];
+                    delete overrideHeaders['content-type'];
+                } else if (overrideBodyType === 'raw') {
+                    if (typeof requestBody !== 'string') {
+                        requestBody = JSON.stringify(requestBody ?? {});
+                    }
+                } else if (overrideBodyType === 'json') {
+                    if (!(requestBody instanceof FormData) && typeof requestBody !== 'string') {
+                        requestBody = JSON.stringify(requestBody ?? {});
+                    }
+                }
+
+                let finalEndpoint = overrideUrl;
+                if (!finalEndpoint.startsWith('http')) {
+                    const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+                    finalEndpoint = `${cleanBaseUrl}${finalEndpoint.startsWith('/') ? finalEndpoint : '/' + finalEndpoint}`;
+                }
+
+                const resp = await fetch(finalEndpoint, { method: overrideMethod, headers: overrideHeaders, body: requestBody });
                 const text = await resp.text();
                 if (!resp.ok) throw new Error(text || `Video API error: ${resp.status} `);
                 const data = JSON.parse(text);
@@ -12352,6 +13175,61 @@ function TapnowApp() {
 
     // 功能5：保存项目到JSON文件（流式写入，支持超大文件）
     const handleSaveProject = async () => {
+        const shouldSaveHistoryAssets = !!saveHistoryAssets;
+        const convertHistoryAssetUrl = async (url, item, force = false) => {
+            if (!url || typeof url !== 'string') return url;
+            if (url.startsWith('data:')) return normalizeDataUrl(url);
+            if (!force && !shouldSaveHistoryAssets) return url;
+            try {
+                const baseProxy = getItemProxyPreference(item);
+                const useProxy = getProxyPreferenceForUrl(url, baseProxy);
+                const { blob } = await fetchCacheSource(url, { useProxy, preferLocal: true });
+                if (!blob) return url;
+                const dataUrl = await blobToDataURL(blob);
+                return normalizeDataUrl(dataUrl);
+            } catch (e) {
+                console.error('转换历史资源失败:', e);
+                return url;
+            }
+        };
+        const convertHistoryItemBlobUrls = async (item) => {
+            const itemCopy = { ...item };
+            if (itemCopy.url && typeof itemCopy.url === 'string') {
+                const force = itemCopy.url.startsWith('blob:');
+                itemCopy.url = await convertHistoryAssetUrl(itemCopy.url, itemCopy, force);
+            }
+            if (itemCopy.mjOriginalUrl && typeof itemCopy.mjOriginalUrl === 'string') {
+                const force = itemCopy.mjOriginalUrl.startsWith('blob:');
+                itemCopy.mjOriginalUrl = await convertHistoryAssetUrl(itemCopy.mjOriginalUrl, itemCopy, force);
+            }
+            if (itemCopy.originalUrl && typeof itemCopy.originalUrl === 'string') {
+                const force = itemCopy.originalUrl.startsWith('blob:');
+                itemCopy.originalUrl = await convertHistoryAssetUrl(itemCopy.originalUrl, itemCopy, force);
+            }
+            if (itemCopy.thumbnailUrl && typeof itemCopy.thumbnailUrl === 'string') {
+                const force = itemCopy.thumbnailUrl.startsWith('blob:');
+                itemCopy.thumbnailUrl = await convertHistoryAssetUrl(itemCopy.thumbnailUrl, itemCopy, force);
+            }
+            if (Array.isArray(itemCopy.mjImages)) {
+                for (let i = 0; i < itemCopy.mjImages.length; i++) {
+                    const imgUrl = itemCopy.mjImages[i];
+                    if (imgUrl && typeof imgUrl === 'string') {
+                        const force = imgUrl.startsWith('blob:');
+                        itemCopy.mjImages[i] = await convertHistoryAssetUrl(imgUrl, itemCopy, force);
+                    }
+                }
+            }
+            if (Array.isArray(itemCopy.output_images)) {
+                for (let i = 0; i < itemCopy.output_images.length; i++) {
+                    const imgUrl = itemCopy.output_images[i];
+                    if (imgUrl && typeof imgUrl === 'string') {
+                        const force = imgUrl.startsWith('blob:');
+                        itemCopy.output_images[i] = await convertHistoryAssetUrl(imgUrl, itemCopy, force);
+                    }
+                }
+            }
+            return itemCopy;
+        };
         try {
             // 兼容性检查：优先使用 File System Access API
             if (!window.showSaveFilePicker) {
@@ -12394,6 +13272,9 @@ function TapnowApp() {
                 const nodesWithDataUrls = await convertBlobUrlsToDataUrls(nodesToSave);
                 const characterLibraryToSave = JSON.parse(JSON.stringify(characterLibrary, replacer));
                 const characterLibraryWithDataUrls = await convertBlobUrlsToDataUrls(characterLibraryToSave);
+                const historyToSave = shouldSaveHistoryAssets
+                    ? await Promise.all(history.map(item => convertHistoryItemBlobUrls(item)))
+                    : history;
                 const projectData = {
                     version: '2.5.7',
                     projectName,
@@ -12401,7 +13282,7 @@ function TapnowApp() {
                     nodes: nodesWithDataUrls,
                     connections,
                     view,
-                    history,
+                    history: historyToSave,
                     chatSessions,
                     characterLibrary: characterLibraryWithDataUrls,
                     modelLibrary,
@@ -12436,7 +13317,6 @@ function TapnowApp() {
                 if (value === undefined) return null;
                 return value;
             };
-
             // 辅助函数：转换单个节点的 Blob URL 字段
             const convertNodeBlobUrls = async (node) => {
                 const nodeCopy = { ...node };
@@ -12456,7 +13336,7 @@ function TapnowApp() {
                 if (nodeCopy.maskContent && typeof nodeCopy.maskContent === 'string' && nodeCopy.maskContent.startsWith('blob:')) {
                     try {
                         const b64 = await getBase64FromUrl(nodeCopy.maskContent);
-                        nodeCopy.maskContent = `data:image/png;base64, ${b64} `;
+                        nodeCopy.maskContent = `data:image/png;base64,${b64}`;
                     } catch (e) {
                         console.error('转换节点 maskContent 失败:', e);
                     }
@@ -12469,7 +13349,7 @@ function TapnowApp() {
                         if (frame && frame.url && typeof frame.url === 'string' && frame.url.startsWith('blob:')) {
                             try {
                                 const b64 = await getBase64FromUrl(frame.url);
-                                frame.url = `data:image/png;base64, ${b64} `;
+                                frame.url = `data:image/png;base64,${b64}`;
                             } catch (e) {
                                 console.error('转换关键帧失败:', e);
                             }
@@ -12484,7 +13364,7 @@ function TapnowApp() {
                         if (frame && frame.url && typeof frame.url === 'string' && frame.url.startsWith('blob:')) {
                             try {
                                 const b64 = await getBase64FromUrl(frame.url);
-                                frame.url = `data:image/png;base64, ${b64} `;
+                                frame.url = `data:image/png;base64,${b64}`;
                             } catch (e) {
                                 console.error('转换帧失败:', e);
                             }
@@ -12510,49 +13390,6 @@ function TapnowApp() {
                 return nodeCopy;
             };
 
-            // 辅助函数：转换历史记录项的 Blob URL
-            const convertHistoryItemBlobUrls = async (item) => {
-                const itemCopy = { ...item };
-
-                // 转换 url
-                if (itemCopy.url && typeof itemCopy.url === 'string' && itemCopy.url.startsWith('blob:')) {
-                    try {
-                        const b64 = await getBase64FromUrl(itemCopy.url);
-                        const mime = itemCopy.type === 'video' ? 'video/mp4' : 'image/png';
-                        itemCopy.url = `data:${mime};base64,${b64}`;
-                    } catch (e) {
-                        console.error('转换历史记录 url 失败:', e);
-                    }
-                }
-
-                // 转换 mjOriginalUrl
-                if (itemCopy.mjOriginalUrl && typeof itemCopy.mjOriginalUrl === 'string' && itemCopy.mjOriginalUrl.startsWith('blob:')) {
-                    try {
-                        const b64 = await getBase64FromUrl(itemCopy.mjOriginalUrl);
-                        itemCopy.mjOriginalUrl = `data:image/png;base64, ${b64} `;
-                    } catch (e) {
-                        console.error('转换 mjOriginalUrl 失败:', e);
-                    }
-                }
-
-                // 转换 mjImages 数组
-                if (Array.isArray(itemCopy.mjImages)) {
-                    for (let i = 0; i < itemCopy.mjImages.length; i++) {
-                        const imgUrl = itemCopy.mjImages[i];
-                        if (imgUrl && typeof imgUrl === 'string' && imgUrl.startsWith('blob:')) {
-                            try {
-                                const b64 = await getBase64FromUrl(imgUrl);
-                                itemCopy.mjImages[i] = `data:image/png;base64, ${b64} `;
-                            } catch (e) {
-                                console.error('转换 mjImages 失败:', e);
-                            }
-                        }
-                    }
-                }
-
-                return itemCopy;
-            };
-
             // 辅助函数：转换角色库项的 Blob URL
             const convertCharacterBlobUrls = async (character) => {
                 const charCopy = { ...character };
@@ -12561,7 +13398,7 @@ function TapnowApp() {
                 if (charCopy.avatar && typeof charCopy.avatar === 'string' && charCopy.avatar.startsWith('blob:')) {
                     try {
                         const b64 = await getBase64FromUrl(charCopy.avatar);
-                        charCopy.avatar = `data:image/png;base64, ${b64} `;
+                        charCopy.avatar = `data:image/png;base64,${b64}`;
                     } catch (e) {
                         console.error('转换角色 avatar 失败:', e);
                     }
@@ -12571,7 +13408,7 @@ function TapnowApp() {
                 if (charCopy.profile_picture_url && typeof charCopy.profile_picture_url === 'string' && charCopy.profile_picture_url.startsWith('blob:')) {
                     try {
                         const b64 = await getBase64FromUrl(charCopy.profile_picture_url);
-                        charCopy.profile_picture_url = `data:image/png;base64, ${b64} `;
+                        charCopy.profile_picture_url = `data:image/png;base64,${b64}`;
                     } catch (e) {
                         console.error('转换角色 profile_picture_url 失败:', e);
                     }
@@ -13866,6 +14703,7 @@ function TapnowApp() {
         if (resolvedId.includes('sora-2') || resolvedId === 'sora-2') return '15s';
         if (resolvedId.includes('veo') || resolvedId === 'google-veo3') return '8s';
         if (resolvedId.includes('grok') || resolvedId === 'grok-3') return '8s';
+        if (resolvedId.includes('jimeng-video-sora2') || resolvedId.includes('jimeng-sora2')) return '4s';
         return '5s';
     };
 
@@ -13881,6 +14719,7 @@ function TapnowApp() {
         if (resolvedId.includes('sora-2') || resolvedId === 'sora-2') return ['5s', '10s', '15s'];
         if (resolvedId.includes('veo') || resolvedId === 'google-veo3') return ['8s'];
         if (resolvedId.includes('grok') || resolvedId === 'grok-3') return ['8s', '5s'];
+        if (resolvedId.includes('jimeng-video-sora2') || resolvedId.includes('jimeng-sora2')) return ['4s', '8s', '12s'];
         if (resolvedId.includes('jimeng')) return ['5s', '10s'];  // Jimeng 只支持 5s 和 10s
         return ['5s', '10s'];
     };
@@ -14201,7 +15040,7 @@ function TapnowApp() {
             } else {
                 // 如果没有提供，使用默认路径
                 const baseUrl = (soraConfig.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
-                endpoint = `${baseUrl} /sora/v1 / characters`;
+                endpoint = `${baseUrl}/sora/v1/characters`;
             }
 
             // 3. 构造 Body
@@ -14518,7 +15357,9 @@ function TapnowApp() {
                 width: 0,
                 height: 0,
                 remoteTaskId: null,
-                apiConfig: { modelId: 'mj-zoom', baseUrl, apiKey },
+                apiConfig: { modelId: 'mj-zoom', baseUrl, apiKey, provider: mjConfig?.provider, useProxy: !!credentials.useProxy },
+                provider: mjConfig?.provider,
+                useProxy: !!credentials.useProxy,
                 sourceNodeId: nodeId,
                 startTime: now,
                 durationMs: null
@@ -14527,7 +15368,7 @@ function TapnowApp() {
 
             // 3. 提交图片到 Midjourney（使用 imagine 接口，不包含 zoom 参数）
             const mjMode = 'fast';
-            const imagineEndpoint = `${baseUrl} /${mjMode}/mj / submit / imagine`;
+            const imagineEndpoint = `${baseUrl}/${mjMode}/mj/submit/imagine`;
             const imaginePayload = {
                 prompt: imageUrl,
                 notifyHook: '',
@@ -14567,7 +15408,7 @@ function TapnowApp() {
                 pollCount++;
 
                 try {
-                    const statusResp = await fetch(`${baseUrl} /${mjMode}/mj / task / ${originalTaskId}/fetch`, {
+                    const statusResp = await fetch(`${baseUrl}/${mjMode}/mj/task/${originalTaskId}/fetch`, {
                         method: 'GET',
                         headers: {
                             'Authorization': `Bearer ${apiKey}`,
@@ -25355,6 +26196,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 </button>
                                             </div>
                                             <div className="flex items-center justify-between">
+                                                <div>
+                                                    <span className="text-[10px] text-zinc-500">启用缓存时重新下载</span>
+                                                    <div className="text-[9px] text-zinc-500 mt-0.5">开启后会忽略已存在文件</div>
+                                                </div>
+                                                <button
+                                                    className={`w-10 h-5 rounded-full relative transition-colors ${cacheRedownloadOnEnable ? 'bg-green-600' : theme === 'solarized' ? 'bg-zinc-300' : 'bg-zinc-600'}`}
+                                                    onClick={() => setCacheRedownloadOnEnable(prev => !prev)}
+                                                >
+                                                    <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${cacheRedownloadOnEnable ? 'left-6' : 'left-1'}`} />
+                                                </button>
+                                            </div>
+                                            <div className="flex items-center justify-between">
                                                 <span className="text-[10px] text-zinc-500">PNG 转 JPG（省空间）</span>
                                                 <button
                                                     className={`w-10 h-5 rounded-full relative transition-colors ${localServerConfig.convertPngToJpg ? 'bg-green-600' : theme === 'solarized' ? 'bg-zinc-300' : 'bg-zinc-600'} ${!localServerConfig.pilAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
@@ -25419,9 +26272,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             providers={providers}
                                                             defaultProviders={DEFAULT_PROVIDERS}
                                                             localCacheActive={localCacheActive}
+                                                            historyLocalCacheMap={historyLocalCacheMap}
                                                             onCacheMissing={handleHistoryCacheMissing}
                                                             onDelete={deleteHistoryItem}
                                                             getHistoryMeta={getHistoryMeta}
+                                                            resolveHistoryUrl={resolveHistoryUrl}
                                                             isSelected={historySelection.has(item.id)}
                                                             onSelect={(id) => {
                                                                 setHistorySelection(prev => {
@@ -25432,6 +26287,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 });
                                                             }}
                                                             onClick={() => {
+                                                                setHistoryFocusId(item.id);
                                                                 const currentIndex = item.mjImages && item.mjImages.length > 1
                                                                     ? (item.selectedMjImageIndex !== undefined ? item.selectedMjImageIndex : 0)
                                                                     : 0;
@@ -25454,6 +26310,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             onContextMenu={(e) => handleHistoryRightClick(e, item)}
                                                             onImageClick={(e, item, imgUrl, idx) => {
                                                                 e.stopPropagation();
+                                                                setHistoryFocusId(item.id);
                                                                 setHistory((prev) => prev.map((hItem) =>
                                                                     hItem.id === item.id
                                                                         ? { ...hItem, url: imgUrl, selectedMjImageIndex: idx }
@@ -25502,9 +26359,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             providers={providers}
                                                             defaultProviders={DEFAULT_PROVIDERS}
                                                             localCacheActive={localCacheActive}
+                                                            historyLocalCacheMap={historyLocalCacheMap}
                                                             onCacheMissing={handleHistoryCacheMissing}
                                                             onDelete={deleteHistoryItem}
                                                             getHistoryMeta={getHistoryMeta}
+                                                            resolveHistoryUrl={resolveHistoryUrl}
                                                             isSelected={historySelection.has(item.id)}
                                                             onSelect={(id) => {
                                                                 setHistorySelection(prev => {
@@ -25515,6 +26374,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 });
                                                             }}
                                                             onClick={() => {
+                                                                setHistoryFocusId(item.id);
                                                                 const currentIndex = item.mjImages && item.mjImages.length > 1
                                                                     ? (item.selectedMjImageIndex !== undefined ? item.selectedMjImageIndex : 0)
                                                                     : 0;
@@ -25537,6 +26397,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             onContextMenu={(e) => handleHistoryRightClick(e, item)}
                                                             onImageClick={(e, item, imgUrl, idx) => {
                                                                 e.stopPropagation();
+                                                                setHistoryFocusId(item.id);
                                                                 setHistory((prev) => prev.map((hItem) =>
                                                                     hItem.id === item.id
                                                                         ? { ...hItem, url: imgUrl, selectedMjImageIndex: idx }
@@ -27169,22 +28030,15 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 <div className="grid grid-cols-2 gap-3 mt-2">
                                                     <div>
                                                         <div className="flex items-center justify-between mb-1">
-                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>性能模式</span>
-                                                            <select
-                                                                value={performanceMode}
-                                                                onChange={(e) => {
-                                                                    const mode = e.target.value;
-                                                                    setPerformanceMode(mode);
-                                                                    localStorage.setItem('tapnow_performance_mode', mode);
-                                                                }}
-                                                                className={`text-xs rounded px-2 py-0.5 border outline-none ${theme === 'dark' ? 'bg-zinc-800 border-zinc-700 text-zinc-300' : 'bg-white border-zinc-300'}`}
+                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>保存历史资产</span>
+                                                            <button
+                                                                className={`w-10 h-5 rounded-full relative transition-colors ${saveHistoryAssets ? 'bg-blue-600' : theme === 'dark' ? 'bg-zinc-700' : 'bg-zinc-300'}`}
+                                                                onClick={() => setSaveHistoryAssets(prev => !prev)}
                                                             >
-                                                                <option value="off">关闭 (原画)</option>
-                                                                <option value="normal">标准 (缩略图)</option>
-                                                                <option value="ultra">极致 (仅缓存)</option>
-                                                            </select>
+                                                                <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${saveHistoryAssets ? 'left-6' : 'left-1'}`} />
+                                                            </button>
                                                         </div>
-                                                        <p className="text-[9px] text-zinc-500">控制历史记录卡片的渲染质量，极致模式下优先使用本地缓存。</p>
+                                                        <p className="text-[9px] text-zinc-500">保存项目时将历史图片/视频写入文件，体积会增大。</p>
                                                     </div>
                                                     <div>
                                                         <div className="flex flex-col gap-1">
@@ -27298,6 +28152,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             globalApiKey,
                                                             providers,
                                                             modelLibrary,
+                                                            modelLibraryCollapsed: Array.from(collapsedLibraryModels),
                                                             // V3.4.23: 导出时移除模型级别的 key/url，只保留纯净的配置
                                                             apiConfigs: apiConfigs.map(({ key, url, ...c }) => c),
                                                         };
@@ -27368,10 +28223,23 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             supportsHD: !!entry.supportsHD,
                                                                             customParams: normalizeCustomParams(entry.customParams),
                                                                             previewOverrideEnabled: !!entry.previewOverrideEnabled,
-                                                                            previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch)
+                                                                            previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
+                                                                            requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                                                                            requestOverrideEnabled: !!entry.requestOverrideEnabled,
+                                                                            requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch)
                                                                         }))
                                                                         .filter((entry) => entry.id);
                                                                     setModelLibrary(normalizedLibrary);
+                                                                }
+                                                                if (Array.isArray(data.modelLibraryCollapsed)) {
+                                                                    const collapsedSet = new Set(data.modelLibraryCollapsed.filter(Boolean));
+                                                                    collapsedLibraryStateLoadedRef.current = true;
+                                                                    setCollapsedLibraryModels(collapsedSet);
+                                                                    try {
+                                                                        localStorage.setItem('tapnow_model_library_collapsed', JSON.stringify(Array.from(collapsedSet)));
+                                                                    } catch (e) {
+                                                                        console.error('保存模型库折叠状态失败:', e);
+                                                                    }
                                                                 }
                                                                 if (data.apiConfigs && Array.isArray(data.apiConfigs)) {
                                                                     // V3.6.0: 迁移导入的旧格式配置
@@ -27893,6 +28761,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const videoResolutionNotes = entry.videoResolutionNotes || {};
                                             const videoResolutionNotesEnabled = !!entry.videoResolutionNotesEnabled;
                                             const customParams = Array.isArray(entry.customParams) ? entry.customParams : [];
+                                            const requestTemplateValue = normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForType(entry.type || 'Chat'));
+                                            const requestTemplateEnabled = requestTemplateValue?.enabled !== false;
+                                            const requestOverridePatch = normalizeRequestOverridePatch(entry.requestOverridePatch);
                                             const previewBase = {
                                                 model: entry.modelName || entry.id,
                                                 type: entry.type || 'Chat',
@@ -27916,6 +28787,56 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             const previewPython = buildPythonPreviewSnippet(previewEndpoint, previewPayload);
                                             const isPreviewEditing = libraryPreviewEditing.has(entry.id);
                                             const previewDraft = libraryPreviewDrafts[entry.id] || '';
+                                            const requestPreviewVars = (() => {
+                                                const vars = {
+                                                    modelName: entry.modelName || entry.id,
+                                                    prompt: '示例提示词',
+                                                    ratio: previewBase.ratio || '1:1',
+                                                    resolution: previewBase.resolution || previewBase.size || '2K',
+                                                    size: previewBase.size || previewBase.resolution || '2K',
+                                                    duration: previewBase.duration || '5',
+                                                    durationNumber: normalizeDurationValue(previewBase.duration || '5', 5),
+                                                    provider: {
+                                                        key: 'API_KEY',
+                                                        baseUrl: 'https://api.example.com'
+                                                    },
+                                                    imageUrl: 'https://example.com/image.png',
+                                                    imageDataUrl: 'data:image/png;base64,PLACEHOLDER'
+                                                };
+                                                if (customParams.length > 0) {
+                                                    customParams.forEach((param) => {
+                                                        const name = String(param?.name || '').trim();
+                                                        if (!name) return;
+                                                        const value = Array.isArray(param.values) && param.values.length > 0 ? param.values[0] : '';
+                                                        if (!value) return;
+                                                        vars[name] = value;
+                                                    });
+                                                }
+                                                return vars;
+                                            })();
+                                            const requestPreviewBase = requestTemplateValue
+                                                ? buildRequestFromTemplate(requestTemplateValue, requestPreviewVars, { bodyType: requestTemplateValue.bodyType })
+                                                : null;
+                                            const requestPreviewFinal = requestPreviewBase && entry.requestOverrideEnabled && requestOverridePatch
+                                                ? applyRequestOverridePatch({ ...requestPreviewBase }, requestOverridePatch)
+                                                : requestPreviewBase;
+                                            const requestPreviewDisplay = formatRequestPreview(requestPreviewFinal);
+                                            const isRequestPreviewEditing = libraryRequestPreviewEditing.has(entry.id);
+                                            const requestPreviewDraft = libraryRequestPreviewDrafts[entry.id]
+                                                || (requestPreviewDisplay ? JSON.stringify(requestPreviewDisplay, null, 2) : '');
+                                            const requestTemplateDraft = libraryRequestTemplateDrafts[entry.id] || {
+                                                headers: JSON.stringify(requestTemplateValue?.headers || {}, null, 2),
+                                                body: requestTemplateValue?.bodyType === 'raw'
+                                                    ? String(requestTemplateValue?.body ?? '')
+                                                    : JSON.stringify(requestTemplateValue?.body || {}, null, 2)
+                                            };
+                                            const updateRequestTemplate = (updates) => {
+                                                const nextTemplate = normalizeRequestTemplate({
+                                                    ...(requestTemplateValue || getDefaultRequestTemplateForType(entry.type || 'Chat')),
+                                                    ...updates
+                                                });
+                                                updateModelLibraryEntry(entry.id, { requestTemplate: nextTemplate });
+                                            };
                                             return (
                                                 <div key={entry.id} className={`rounded-lg border p-3 space-y-3 ${theme === 'dark'
                                                     ? 'bg-[#18181b] border-zinc-800'
@@ -28531,6 +29452,169 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-400'}`}>未设置自定义参数</div>
                                                                 )}
                                                             </div>
+                                                            <div className={`rounded-md border p-2 ${theme === 'dark'
+                                                                ? 'bg-zinc-950/60 border-zinc-800'
+                                                                : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5]' : 'bg-zinc-50 border-zinc-200'
+                                                                }`}>
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>请求模板</div>
+                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={requestTemplateEnabled}
+                                                                            onChange={(e) => updateRequestTemplate({ enabled: e.target.checked })}
+                                                                            disabled={!isEditing}
+                                                                        />
+                                                                        <span>启用</span>
+                                                                    </label>
+                                                                </div>
+                                                                <div className="grid grid-cols-12 gap-2">
+                                                                    <div className="col-span-7 space-y-1">
+                                                                        <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>请求路径</label>
+                                                                        <input
+                                                                            value={requestTemplateValue?.endpoint || ''}
+                                                                            onChange={(e) => updateRequestTemplate({ endpoint: e.target.value })}
+                                                                            placeholder="/v1/images/generations"
+                                                                            disabled={!isEditing}
+                                                                            className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                }`}
+                                                                        />
+                                                                    </div>
+                                                                    <div className="col-span-2 space-y-1">
+                                                                        <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>方法</label>
+                                                                        <select
+                                                                            value={requestTemplateValue?.method || 'POST'}
+                                                                            onChange={(e) => updateRequestTemplate({ method: e.target.value })}
+                                                                            disabled={!isEditing}
+                                                                            className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                }`}
+                                                                        >
+                                                                            <option value="POST">POST</option>
+                                                                            <option value="GET">GET</option>
+                                                                            <option value="PUT">PUT</option>
+                                                                            <option value="PATCH">PATCH</option>
+                                                                            <option value="DELETE">DELETE</option>
+                                                                        </select>
+                                                                    </div>
+                                                                    <div className="col-span-3 space-y-1">
+                                                                        <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>BodyType</label>
+                                                                        <select
+                                                                            value={requestTemplateValue?.bodyType || 'json'}
+                                                                            onChange={(e) => {
+                                                                                updateRequestTemplate({ bodyType: e.target.value });
+                                                                                setLibraryRequestTemplateDrafts(prev => {
+                                                                                    if (!prev[entry.id]) return prev;
+                                                                                    const { [entry.id]: _removed, ...rest } = prev;
+                                                                                    return rest;
+                                                                                });
+                                                                            }}
+                                                                            disabled={!isEditing}
+                                                                            className={`w-full text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                }`}
+                                                                        >
+                                                                            <option value="json">json</option>
+                                                                            <option value="multipart">multipart</option>
+                                                                            <option value="raw">raw</option>
+                                                                        </select>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="grid grid-cols-12 gap-2 mt-2">
+                                                                    <div className="col-span-6 space-y-1">
+                                                                        <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>请求头（JSON）</label>
+                                                                        <textarea
+                                                                            value={requestTemplateDraft.headers}
+                                                                            onChange={(e) => setLibraryRequestTemplateDrafts(prev => ({
+                                                                                ...prev,
+                                                                                [entry.id]: { ...requestTemplateDraft, headers: e.target.value }
+                                                                            }))}
+                                                                            disabled={!isEditing}
+                                                                            className={`w-full h-24 text-[9px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-200'
+                                                                                : 'bg-white border-zinc-300 text-zinc-800'
+                                                                                }`}
+                                                                        />
+                                                                    </div>
+                                                                    <div className="col-span-6 space-y-1">
+                                                                        <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>请求体（JSON / Raw）</label>
+                                                                        <textarea
+                                                                            value={requestTemplateDraft.body}
+                                                                            onChange={(e) => setLibraryRequestTemplateDrafts(prev => ({
+                                                                                ...prev,
+                                                                                [entry.id]: { ...requestTemplateDraft, body: e.target.value }
+                                                                            }))}
+                                                                            disabled={!isEditing}
+                                                                            className={`w-full h-24 text-[9px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-200'
+                                                                                : 'bg-white border-zinc-300 text-zinc-800'
+                                                                                }`}
+                                                                        />
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center justify-between mt-2">
+                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>
+                                                                        变量示例：{'{{prompt}}'}, {'{{duration:number}}'}, {'{{image:blob}}'}, {'{{size}}'}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                try {
+                                                                                    const headersText = requestTemplateDraft.headers?.trim() || '{}';
+                                                                                    const bodyText = requestTemplateDraft.body ?? '';
+                                                                                    const parsedHeaders = headersText ? JSON.parse(headersText) : {};
+                                                                                    if (!parsedHeaders || typeof parsedHeaders !== 'object' || Array.isArray(parsedHeaders)) {
+                                                                                        throw new Error('请求头必须是对象');
+                                                                                    }
+                                                                                    let parsedBody = bodyText;
+                                                                                    if ((requestTemplateValue?.bodyType || 'json') !== 'raw') {
+                                                                                        const rawBodyText = bodyText?.trim() || '{}';
+                                                                                        parsedBody = rawBodyText ? JSON.parse(rawBodyText) : {};
+                                                                                        if (!parsedBody || typeof parsedBody !== 'object') {
+                                                                                            throw new Error('请求体必须是对象');
+                                                                                        }
+                                                                                    }
+                                                                                    updateRequestTemplate({ headers: parsedHeaders, body: parsedBody });
+                                                                                    setLibraryRequestTemplateDrafts(prev => {
+                                                                                        const { [entry.id]: _removed, ...rest } = prev;
+                                                                                        return rest;
+                                                                                    });
+                                                                                    showToast('请求模板已保存', 'success', 2000);
+                                                                                } catch (e) {
+                                                                                    showToast('请求模板 JSON 格式无效', 'error', 2000);
+                                                                                }
+                                                                            }}
+                                                                            disabled={!isEditing}
+                                                                            className={`px-2 py-1 rounded text-[9px] ${theme === 'dark'
+                                                                                ? 'bg-zinc-700 text-zinc-200 hover:bg-zinc-600'
+                                                                                : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
+                                                                                } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                        >
+                                                                            保存模板
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                updateModelLibraryEntry(entry.id, { requestTemplate: getDefaultRequestTemplateForType(entry.type || 'Chat') });
+                                                                                setLibraryRequestTemplateDrafts(prev => {
+                                                                                    const { [entry.id]: _removed, ...rest } = prev;
+                                                                                    return rest;
+                                                                                });
+                                                                            }}
+                                                                            disabled={!isEditing}
+                                                                            className={`px-2 py-1 rounded text-[9px] ${theme === 'dark'
+                                                                                ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                                                                : 'bg-zinc-100 text-zinc-500 hover:bg-zinc-200'
+                                                                                } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                        >
+                                                                            重置
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
                                                             {isPreviewOpen && (
                                                                 <div className={`rounded-md border p-2 ${theme === 'dark'
                                                                     ? 'bg-zinc-950/60 border-zinc-800'
@@ -28650,6 +29734,120 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     <pre className={`text-[9px] whitespace-pre-wrap ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
                                                                         {previewPython}
                                                                     </pre>
+                                                                    <div className="mt-3 pt-2 border-t border-dashed border-zinc-400/30">
+                                                                        <div className="flex items-center justify-between mb-1">
+                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>最终请求预览</div>
+                                                                            <div className="flex items-center gap-2">
+                                                                                <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                                    <input
+                                                                                        type="checkbox"
+                                                                                        checked={!!entry.requestOverrideEnabled}
+                                                                                        onChange={(e) => updateModelLibraryEntry(entry.id, { requestOverrideEnabled: e.target.checked })}
+                                                                                    />
+                                                                                    <span>修改覆盖</span>
+                                                                                </label>
+                                                                                <button
+                                                                                    onClick={() => {
+                                                                                        if (isRequestPreviewEditing) {
+                                                                                            setLibraryRequestPreviewEditing(prev => {
+                                                                                                const next = new Set(prev);
+                                                                                                next.delete(entry.id);
+                                                                                                return next;
+                                                                                            });
+                                                                                            setLibraryRequestPreviewDrafts(prev => {
+                                                                                                const { [entry.id]: _removed, ...rest } = prev;
+                                                                                                return rest;
+                                                                                            });
+                                                                                        } else {
+                                                                                            setLibraryRequestPreviewEditing(prev => {
+                                                                                                const next = new Set(prev);
+                                                                                                next.add(entry.id);
+                                                                                                return next;
+                                                                                            });
+                                                                                            setLibraryRequestPreviewDrafts(prev => ({
+                                                                                                ...prev,
+                                                                                                [entry.id]: requestPreviewDisplay ? JSON.stringify(requestPreviewDisplay, null, 2) : ''
+                                                                                            }));
+                                                                                        }
+                                                                                    }}
+                                                                                    className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                    title={isRequestPreviewEditing ? '取消编辑' : '编辑请求'}
+                                                                                >
+                                                                                    <Edit3 size={12} className={isRequestPreviewEditing ? 'text-blue-500' : ''} />
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className={`text-[9px] mb-1 ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                                                                            模板状态：{requestTemplateEnabled ? '已启用' : '未启用'} · BodyType: {requestTemplateValue?.bodyType || 'json'}
+                                                                        </div>
+                                                                        {isRequestPreviewEditing ? (
+                                                                            <div className="space-y-2">
+                                                                                <textarea
+                                                                                    value={requestPreviewDraft}
+                                                                                    onChange={(e) => setLibraryRequestPreviewDrafts(prev => ({ ...prev, [entry.id]: e.target.value }))}
+                                                                                    className={`w-full h-40 text-[9px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                        ? 'bg-zinc-900 border-zinc-800 text-zinc-200'
+                                                                                        : 'bg-white border-zinc-300 text-zinc-800'
+                                                                                        }`}
+                                                                                />
+                                                                                <div className="flex items-center justify-end gap-2">
+                                                                                    <button
+                                                                                        onClick={() => {
+                                                                                            try {
+                                                                                                const parsed = requestPreviewDraft ? JSON.parse(requestPreviewDraft) : {};
+                                                                                                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                                                                                                    throw new Error('请求预览必须是对象');
+                                                                                                }
+                                                                                                const patch = buildPreviewOverridePatch(requestPreviewDisplay || {}, parsed);
+                                                                                                updateModelLibraryEntry(entry.id, { requestOverridePatch: patch });
+                                                                                                setLibraryRequestPreviewEditing(prev => {
+                                                                                                    const next = new Set(prev);
+                                                                                                    next.delete(entry.id);
+                                                                                                    return next;
+                                                                                                });
+                                                                                                setLibraryRequestPreviewDrafts(prev => {
+                                                                                                    const { [entry.id]: _removed, ...rest } = prev;
+                                                                                                    return rest;
+                                                                                                });
+                                                                                                showToast('请求覆盖已更新', 'success', 2000);
+                                                                                            } catch (e) {
+                                                                                                showToast('请求预览 JSON 无效', 'error', 2000);
+                                                                                            }
+                                                                                        }}
+                                                                                        className={`px-2 py-1 rounded text-[9px] ${theme === 'dark'
+                                                                                            ? 'bg-zinc-700 text-zinc-200 hover:bg-zinc-600'
+                                                                                            : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
+                                                                                            }`}
+                                                                                    >
+                                                                                        保存
+                                                                                    </button>
+                                                                                    <button
+                                                                                        onClick={() => {
+                                                                                            setLibraryRequestPreviewEditing(prev => {
+                                                                                                const next = new Set(prev);
+                                                                                                next.delete(entry.id);
+                                                                                                return next;
+                                                                                            });
+                                                                                            setLibraryRequestPreviewDrafts(prev => {
+                                                                                                const { [entry.id]: _removed, ...rest } = prev;
+                                                                                                return rest;
+                                                                                            });
+                                                                                        }}
+                                                                                        className={`px-2 py-1 rounded text-[9px] ${theme === 'dark'
+                                                                                            ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                                                                            : 'bg-zinc-100 text-zinc-500 hover:bg-zinc-200'
+                                                                                            }`}
+                                                                                    >
+                                                                                        取消
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        ) : (
+                                                                            <pre className={`text-[9px] whitespace-pre-wrap ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                                                                {requestPreviewDisplay ? JSON.stringify(requestPreviewDisplay, null, 2) : '请求模板为空'}
+                                                                            </pre>
+                                                                        )}
+                                                                    </div>
                                                                 </div>
                                                             )}
                                                         </>
