@@ -824,7 +824,10 @@ const HistoryItem = memo(({
     const hasLocalCache = !!(localCacheActive && localCacheFallback && (!isLocalCacheUrlAvailable || isLocalCacheUrlAvailable(localCacheFallback)));
     const thumbnailUrl = item.thumbnailUrl || null;
     const canDrag = item.status === 'completed' && (item.type === 'image' || (multiImages && multiImages.length > 0));
+    const historyMeta = getHistoryMeta ? getHistoryMeta(item) : null;
+    const resolvedModelLabel = historyMeta?.modelLabel;
     const rawModelName = (() => {
+        if (resolvedModelLabel) return resolvedModelLabel;
         const fallback = item.apiConfig?.modelId || item.apiConfig?.model || item.model || item.modelName || '未知模型';
         if (item.modelName && item.provider && item.modelName.toLowerCase() === item.provider.toLowerCase()) return fallback;
         return item.modelName || fallback;
@@ -892,7 +895,6 @@ const HistoryItem = memo(({
         }
     }, [localCacheActive, localCacheFallback, item.id, onCacheMissing, isLocalCacheUrlAvailable]);
 
-    const historyMeta = getHistoryMeta ? getHistoryMeta(item) : null;
     const ratioLabel = historyMeta?.ratioLabel ?? (item.ratio || item.mjRatio);
     const resolutionLabel = historyMeta?.resolutionLabel ?? (item.resolution || (item.width && item.height ? `${item.width}x${item.height}` : null));
     const durationLabel = historyMeta?.durationLabel ?? ((item.type === 'video' && item.duration) ? `${item.duration}s` : null);
@@ -1819,6 +1821,64 @@ const DELETED_MODEL_IDS = [
     'wan-2.5'
 ];
 
+const ASYNC_CONFIG_TEMPLATE = {
+    enabled: true,
+    requestIdPaths: ['requestId', 'request_id'],
+    pollIntervalMs: 3000,
+    maxAttempts: 300,
+    statusRequest: {
+        endpoint: '/w/v1/webapp/task/openapi/detail',
+        method: 'GET',
+        headers: { Authorization: 'Bearer {{provider.key}}' },
+        query: { requestId: '{{requestId}}' },
+        bodyType: 'json',
+        body: {}
+    },
+    statusPath: 'data.status',
+    successValues: ['Success'],
+    failureValues: ['Failed', 'Canceled'],
+    outputsRequest: {
+        endpoint: '/w/v1/webapp/task/openapi/outputs',
+        method: 'GET',
+        headers: { Authorization: 'Bearer {{provider.key}}' },
+        query: { requestId: '{{requestId}}' },
+        bodyType: 'json',
+        body: {}
+    },
+    outputsPath: 'data.outputs',
+    outputsUrlField: 'object_url',
+    errorPath: 'message'
+};
+const ASYNC_CONFIG_TEMPLATE_TEXT = JSON.stringify(ASYNC_CONFIG_TEMPLATE, null, 2);
+const buildEmptyAsyncConfig = () => ({
+    enabled: false,
+    requestIdPaths: ['requestId', 'request_id'],
+    pollIntervalMs: 3000,
+    maxAttempts: 300,
+    statusRequest: {
+        endpoint: '',
+        method: 'GET',
+        headers: {},
+        query: {},
+        bodyType: 'json',
+        body: {}
+    },
+    statusPath: '',
+    successValues: [],
+    failureValues: [],
+    outputsRequest: {
+        endpoint: '',
+        method: 'GET',
+        headers: {},
+        query: {},
+        bodyType: 'json',
+        body: {}
+    },
+    outputsPath: '',
+    outputsUrlField: '',
+    errorPath: ''
+});
+
 const DEFAULT_MODEL_LIBRARY = [
     ...DEFAULT_API_CONFIGS
         .filter((config) => !DELETED_MODEL_IDS.includes(config.id))
@@ -1839,7 +1899,8 @@ const DEFAULT_MODEL_LIBRARY = [
                 supportsFirstLastFrame,
                 supportsHD,
                 apiType: DEFAULT_PROVIDERS[config.provider]?.apiType || 'openai',
-                customParams: []
+                customParams: [],
+                asyncConfig: null
             };
             return ({
                 ...entryBase,
@@ -1965,6 +2026,7 @@ const normalizeJimengVideoDuration = (value, allowed = []) => {
     return allowed.includes(parsed) ? parsed : fallback;
 };
 const isImageModelType = (type) => type === 'Image' || type === 'ChatImage';
+const isChatModelType = (type) => type === 'Chat' || type === 'ChatImage';
 const MAX_CUSTOM_PARAMS = 30;
 const MAX_CUSTOM_PARAM_VALUES = 30;
 const normalizeCustomParamNotes = (notes) => {
@@ -1994,7 +2056,8 @@ const normalizeCustomParams = (params) => {
         if (!param) return null;
         const id = String(param.id || '').trim()
             || `param-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${index}`;
-        const name = typeof param.name === 'string' ? param.name : '';
+        const rawName = param?.name ?? param?.label ?? param?.displayName ?? param?.paramName ?? param?.key;
+        const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : '';
         const values = Array.isArray(param.values)
             ? param.values.map(value => String(value).trim()).filter(Boolean)
             : [];
@@ -2115,6 +2178,17 @@ const getNoteLabelWithNotes = (value, notesEnabled, notes) => {
 const getCustomParamValueLabel = (param, value) => {
     return getValueLabelWithNotes(value, !!param?.notesEnabled, param?.valueNotes || {});
 };
+const isCustomParamInputMode = (param) => {
+    if (!param) return false;
+    const rawName = String(param?.name || '');
+    const name = rawName.toLowerCase();
+    if (name.includes('input') || rawName.includes('输入')) return true;
+    const values = Array.isArray(param?.values) ? param.values : [];
+    return values.some((value) => {
+        const rawValue = String(value || '');
+        return rawValue.toLowerCase().includes('input') || rawValue.includes('输入');
+    });
+};
 const applyCustomParamsToPayload = (payload, customParams, selections) => {
     if (!payload || !Array.isArray(customParams) || customParams.length === 0) return payload;
     const isFormData = typeof FormData !== 'undefined' && payload instanceof FormData;
@@ -2228,6 +2302,47 @@ const normalizeRequestTemplate = (template) => {
     };
     return normalized;
 };
+const normalizeStringArray = (value) => {
+    if (Array.isArray(value)) {
+        return value.map(item => String(item || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed ? [trimmed] : [];
+    }
+    return [];
+};
+const normalizeAsyncRequestTemplate = (template) => {
+    if (!template || typeof template !== 'object') return null;
+    return normalizeRequestTemplate({ ...template, enabled: true });
+};
+const normalizeAsyncConfig = (config) => {
+    if (!config || typeof config !== 'object') return null;
+    const normalized = {
+        enabled: config.enabled === true,
+        requestIdPaths: normalizeStringArray(config.requestIdPaths || config.requestIdPath || config.requestId),
+        pollIntervalMs: Number.isFinite(Number(config.pollIntervalMs)) ? Number(config.pollIntervalMs) : 3000,
+        maxAttempts: Number.isFinite(Number(config.maxAttempts)) ? Number(config.maxAttempts) : 300,
+        statusRequest: normalizeAsyncRequestTemplate(config.statusRequest || config.status || config.pollRequest),
+        statusPath: typeof config.statusPath === 'string' ? config.statusPath.trim() : '',
+        successValues: normalizeStringArray(config.successValues || config.successStatuses || config.successStatus || config.success),
+        failureValues: normalizeStringArray(config.failureValues || config.failureStatuses || config.failureStatus || config.failure),
+        outputsRequest: normalizeAsyncRequestTemplate(config.outputsRequest || config.outputs || config.resultRequest),
+        outputsPath: typeof config.outputsPath === 'string' ? config.outputsPath.trim() : '',
+        outputsUrlField: typeof config.outputsUrlField === 'string' ? config.outputsUrlField.trim() : '',
+        errorPath: typeof config.errorPath === 'string' ? config.errorPath.trim() : ''
+    };
+    if (!normalized.requestIdPaths.length) {
+        normalized.requestIdPaths = ['requestId', 'request_id', 'data.requestId', 'data.request_id'];
+    }
+    normalized.successValues = normalized.successValues.length
+        ? normalized.successValues.map(v => v.toUpperCase())
+        : ['SUCCESS', 'SUCCEED', 'COMPLETED', 'FINISHED', 'DONE'];
+    normalized.failureValues = normalized.failureValues.length
+        ? normalized.failureValues.map(v => v.toUpperCase())
+        : ['FAILED', 'ERROR', 'CANCELLED', 'CANCELED', 'FAILURE'];
+    return normalized;
+};
 const normalizeRequestOverridePatch = (patch) => {
     return normalizePreviewOverridePatch(patch);
 };
@@ -2254,6 +2369,64 @@ const coerceTemplateValue = (value, type, options = {}) => {
     }
     return value;
 };
+const getValueByPath = (data, path) => {
+    if (!data || !path) return undefined;
+    const normalizedPath = String(path).replace(/\[(\d+)\]/g, '.$1').replace(/^\./, '');
+    const parts = normalizedPath.split('.').filter(Boolean);
+    let current = data;
+    for (const part of parts) {
+        if (current === null || current === undefined) return undefined;
+        current = current[part];
+    }
+    return current;
+};
+const getValueByPathAny = (data, paths) => {
+    if (!paths || paths.length === 0) return undefined;
+    for (const path of paths) {
+        const value = getValueByPath(data, path);
+        if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return undefined;
+};
+const normalizeAsyncStatusValue = (value) => {
+    if (value === undefined || value === null) return '';
+    return String(value).trim().toUpperCase();
+};
+const extractAsyncOutputUrls = (outputs, urlField) => {
+    const urls = [];
+    const pushUrl = (value) => {
+        if (!value) return;
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (trimmed) urls.push(trimmed);
+        }
+    };
+    if (Array.isArray(outputs)) {
+        outputs.forEach((item) => {
+            if (!item) return;
+            if (typeof item === 'string') {
+                pushUrl(item);
+                return;
+            }
+            if (typeof item === 'object') {
+                if (urlField && item[urlField]) {
+                    pushUrl(item[urlField]);
+                    return;
+                }
+                pushUrl(item.url || item.image_url || item.imageUrl || item.object_url || item.objectUrl || item.path);
+            }
+        });
+    } else if (outputs && typeof outputs === 'object') {
+        if (urlField && outputs[urlField]) {
+            pushUrl(outputs[urlField]);
+        } else {
+            pushUrl(outputs.url || outputs.image_url || outputs.imageUrl || outputs.object_url || outputs.objectUrl || outputs.path);
+        }
+    } else if (typeof outputs === 'string') {
+        pushUrl(outputs);
+    }
+    return urls;
+};
 const resolveTemplateString = (value, vars, options = {}) => {
     if (typeof value !== 'string') return value;
     const trimmed = value.trim();
@@ -2272,7 +2445,9 @@ const resolveTemplateString = (value, vars, options = {}) => {
             : undefined;
         const raw = getTemplateVarValue(vars, varType === 'blob' ? `${varName}Blob` : varName);
         const coerced = coerceTemplateValue(raw, varType, { bodyType: options.bodyType, fallbackBlobAsDataUrl: fallbackBlob });
-        if (coerced === null || coerced === undefined) return '';
+        if (coerced === null || coerced === undefined) {
+            return options.bodyType === 'raw' ? 'null' : '';
+        }
         if (typeof coerced === 'object') {
             try {
                 return JSON.stringify(coerced);
@@ -3788,8 +3963,8 @@ function TapnowApp() {
                 if (Array.isArray(parsed)) {
                     return parsed.map((entry) => ({
                         id: entry.id,
-                        displayName: entry.displayName || entry.id,
-                        modelName: entry.modelName || entry.id,
+                        displayName: entry.displayName || entry.modelName || entry.id,
+                        modelName: entry.modelName || entry.displayName || entry.id,
                         type: entry.type || 'Chat',
                         apiType: entry.apiType || 'openai',
                         ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
@@ -3807,6 +3982,7 @@ function TapnowApp() {
                         supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                         supportsHD: !!entry.supportsHD,
                         customParams: normalizeCustomParams(entry.customParams),
+                        asyncConfig: entry.asyncConfig && typeof entry.asyncConfig === 'object' ? entry.asyncConfig : null,
                         previewOverrideEnabled: !!entry.previewOverrideEnabled,
                         previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
                         requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
@@ -3900,7 +4076,7 @@ function TapnowApp() {
                 const existingIds = new Set(configs.map(c => c.id).filter(Boolean));
 
                 // V3.7.24: 确保 Chat 模型存在（旧版本可能没有 Chat 类型）
-                const chatModels = DEFAULT_API_CONFIGS.filter(m => m.type === 'Chat');
+                const chatModels = DEFAULT_API_CONFIGS.filter(m => isChatModelType(m.type));
                 chatModels.forEach(m => {
                     if (!existingIds.has(m.id)) {
                         configs.push(m);
@@ -4451,6 +4627,18 @@ function TapnowApp() {
                 next.mjImages = sanitized;
             }
         }
+        if (Array.isArray(next.mjImages) && next.mjImages.length > 1) {
+            if (!Array.isArray(next.output_images) || next.output_images.length < next.mjImages.length) {
+                next.output_images = [...next.mjImages];
+            }
+        }
+        if ((!Array.isArray(next.output_images) || next.output_images.length < 2)
+            && next.localCacheMap && typeof next.localCacheMap === 'object') {
+            const cacheKeys = Object.keys(next.localCacheMap).filter(Boolean);
+            if (cacheKeys.length > 1) {
+                next.output_images = cacheKeys.slice(0, 12);
+            }
+        }
         if (Array.isArray(next.mjThumbnails)) {
             next.mjThumbnails = next.mjThumbnails.map((url) => sanitizeHistoryUrlValue(url, fallback, { allowLocalCache: localCacheActive })).filter(Boolean);
         }
@@ -4657,7 +4845,10 @@ function TapnowApp() {
     const [libraryRequestPreviewEditing, setLibraryRequestPreviewEditing] = useState(() => new Set());
     const [libraryRequestPreviewDrafts, setLibraryRequestPreviewDrafts] = useState(() => ({}));
     const [libraryRequestTemplateDrafts, setLibraryRequestTemplateDrafts] = useState(() => ({}));
+    const [libraryAsyncConfigDrafts, setLibraryAsyncConfigDrafts] = useState(() => ({}));
+    const [libraryAsyncPreviewModels, setLibraryAsyncPreviewModels] = useState(() => new Set());
     const [libraryNotesCollapsed, setLibraryNotesCollapsed] = useState(() => ({}));
+    const [librarySectionCollapsed, setLibrarySectionCollapsed] = useState(() => ({}));
     const [historyOpen, setHistoryOpen] = useState(false);
     const [historyCachePanelOpen, setHistoryCachePanelOpen] = useState(false);
     const [historyQueuePanelOpen, setHistoryQueuePanelOpen] = useState(false);
@@ -6405,6 +6596,12 @@ function TapnowApp() {
                 saved.mjImages = sanitized.slice(0, 12).map(trimHistoryUrlForStorage);
             }
         }
+        if (Array.isArray(saved.mjImages) && saved.mjImages.length > 1) {
+            const needsOutputImages = !Array.isArray(saved.output_images) || saved.output_images.length < saved.mjImages.length;
+            if (needsOutputImages) {
+                saved.output_images = saved.mjImages.slice(0, 12);
+            }
+        }
         if (Array.isArray(saved.mjThumbnails)) {
             saved.mjThumbnails = saved.mjThumbnails
                 .map((url) => sanitizeHistoryUrlValue(url, fallback, { allowLocalCache: false }))
@@ -6489,6 +6686,7 @@ function TapnowApp() {
                     width: item.width,
                     height: item.height,
                     ratio: item.ratio,
+                    output_images: Array.isArray(item.output_images) ? item.output_images.slice(0, 8).map(trimHistoryUrlForStorage) : item.output_images,
                     mjImages: Array.isArray(item.mjImages) ? item.mjImages.slice(0, 8).map(trimHistoryUrlForStorage) : item.mjImages,
                     selectedMjImageIndex: item.selectedMjImageIndex,
                     mjRatio: item.mjRatio,
@@ -6581,8 +6779,8 @@ function TapnowApp() {
             if (!entry?.id) return;
             map.set(entry.id, {
                 ...entry,
-                displayName: entry.displayName || entry.id,
-                modelName: entry.modelName || entry.id,
+                displayName: entry.displayName || entry.modelName || entry.id,
+                modelName: entry.modelName || entry.displayName || entry.id,
                 type: entry.type || 'Chat',
                 apiType: entry.apiType || 'openai',
                 ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
@@ -6600,6 +6798,7 @@ function TapnowApp() {
                 supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                 supportsHD: !!entry.supportsHD,
                 customParams: normalizeCustomParams(entry.customParams),
+                asyncConfig: normalizeAsyncConfig(entry.asyncConfig),
                 previewOverrideEnabled: !!entry.previewOverrideEnabled,
                 previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
                 requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
@@ -6637,6 +6836,7 @@ function TapnowApp() {
             supportsFirstLastFrame: resolvedLibrary ? !!resolvedLibrary.supportsFirstLastFrame : !!config.supportsFirstLastFrame,
             supportsHD: resolvedLibrary ? !!resolvedLibrary.supportsHD : !!config.supportsHD,
             customParams: resolvedLibrary ? normalizeCustomParams(resolvedLibrary.customParams) : normalizeCustomParams(config.customParams),
+            asyncConfig: normalizeAsyncConfig(resolvedLibrary?.asyncConfig || config.asyncConfig),
             previewOverrideEnabled: resolvedLibrary ? !!resolvedLibrary.previewOverrideEnabled : !!config.previewOverrideEnabled,
             previewOverridePatch: normalizePreviewOverridePatch(resolvedLibrary?.previewOverridePatch || config.previewOverridePatch),
             requestTemplate: normalizeRequestTemplate(resolvedLibrary?.requestTemplate || config.requestTemplate),
@@ -6787,6 +6987,15 @@ function TapnowApp() {
         const config = getApiConfigByKey(modelId);
         return config?.displayName || config?.modelName || config?.id || modelId;
     }, [getApiConfigByKey]);
+    const getModelLabelWithProvider = useCallback((modelId) => {
+        if (!modelId) return '选择模型';
+        const config = getApiConfigByKey(modelId);
+        const providerKey = config?.provider || '';
+        const providerLabel = providerKey || '';
+        const modelLabel = config?.modelName || config?.displayName || config?.id || modelId;
+        if (providerLabel) return `${providerLabel} / ${modelLabel}`;
+        return modelLabel;
+    }, [getApiConfigByKey]);
 
     const getHistoryMeta = useCallback((item) => {
         if (!item) return null;
@@ -6816,12 +7025,50 @@ function TapnowApp() {
             config.customParams.forEach((param) => {
                 const selected = getCustomParamSelection(param, item.customParams);
                 if (selected === '' || selected === undefined || selected === null) return;
-                const label = getNoteLabelWithNotes(selected, !!param?.notesEnabled, param?.valueNotes || {});
-                const name = param?.name || param?.id || '参数';
-                customParamLabels.push(`${name}:${label}`);
+                const rawValue = typeof selected === 'string' ? selected.trim() : String(selected);
+                const valueNotes = param?.valueNotes || {};
+                const note = param?.notesEnabled
+                    ? (valueNotes[rawValue] || valueNotes[String(rawValue)] || null)
+                    : null;
+                if (note) {
+                    customParamLabels.push(note);
+                    return;
+                }
+                const label = getNoteLabelWithNotes(rawValue, !!param?.notesEnabled, valueNotes);
+                const nameCandidate = param?.name || param?.label || param?.displayName || param?.paramName || param?.key || param?.id || '';
+                const name = String(nameCandidate || '').trim();
+                if (!name || /^param-/.test(name)) {
+                    customParamLabels.push(label);
+                } else {
+                    customParamLabels.push(`${name}:${label}`);
+                }
             });
         }
-        return { ratioLabel, resolutionLabel, durationLabel, customParamLabels };
+        if (customParamLabels.length === 0 && item.customParams && typeof item.customParams === 'object' && !Array.isArray(item.customParams)) {
+            Object.entries(item.customParams).forEach(([key, value]) => {
+                if (!key) return;
+                if (value === '' || value === undefined || value === null) return;
+                if (/^param-/.test(String(key))) {
+                    customParamLabels.push(String(value));
+                } else {
+                    customParamLabels.push(`${key}:${value}`);
+                }
+            });
+        }
+        const fallbackModel = item.modelName || item.apiConfig?.modelId || item.apiConfig?.model || item.model || '未知模型';
+        const configLabel = config?.displayName || config?.modelName || config?.id || '';
+        let modelLabel = configLabel || fallbackModel;
+        if (!modelLabel || /^uid-/.test(modelLabel)) {
+            const safeItemName = item.modelName && !/^uid-/.test(item.modelName) ? item.modelName : '';
+            modelLabel = config?.modelName || config?.id || safeItemName || fallbackModel || '未知模型';
+        }
+        if (/^uid-/.test(modelLabel)) {
+            modelLabel = '未知模型';
+        }
+        if (item.modelName && item.provider && item.modelName.toLowerCase() === item.provider.toLowerCase()) {
+            modelLabel = configLabel || config?.modelName || config?.id || fallbackModel;
+        }
+        return { ratioLabel, resolutionLabel, durationLabel, customParamLabels, modelLabel };
     }, [getApiConfigByKey]);
 
     const renderCustomParamInputs = useCallback((modelId, currentValues, onChange) => {
@@ -6836,12 +7083,49 @@ function TapnowApp() {
                     const paramId = param.id || param.name;
                     const selectedValue = getCustomParamSelection(param, values);
                     const options = Array.isArray(param.values) ? param.values : [];
+                    const inputMode = isCustomParamInputMode(param);
+                    const filteredOptions = options.filter((option) => !/^(input|输入)$/i.test(String(option || '').trim()));
+                    const paramLabel = param?.name || param?.label || param?.displayName || param?.paramName || param?.key || param?.id || '参数';
                     return (
                         <div key={paramId} className="flex items-center gap-2">
-                            <span className={`text-[10px] w-16 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                                {param.name || '参数'}
+                            <span
+                                className={`text-[10px] min-w-[70px] max-w-[140px] flex-shrink-0 truncate ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-700'}`}
+                                title={paramLabel}
+                            >
+                                {paramLabel}
                             </span>
-                            {options.length > 0 ? (
+                            {inputMode ? (
+                                <>
+                                    <input
+                                        type="text"
+                                        value={selectedValue || ''}
+                                        onChange={(e) => {
+                                            const nextValue = e.target.value;
+                                            const next = { ...values };
+                                            if (nextValue) {
+                                                next[paramId] = nextValue;
+                                            } else {
+                                                delete next[paramId];
+                                            }
+                                            onChange(next);
+                                        }}
+                                        placeholder={t('请输入参数值')}
+                                        list={filteredOptions.length > 0 ? `param-suggest-${paramId}` : undefined}
+                                        className={`flex-1 px-2 py-1 rounded text-xs border ${theme === 'dark'
+                                            ? 'bg-zinc-800 border-zinc-700 text-zinc-200 placeholder-zinc-500'
+                                            : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 placeholder-zinc-400' : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400'
+                                            }`}
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                    />
+                                    {filteredOptions.length > 0 && (
+                                        <datalist id={`param-suggest-${paramId}`}>
+                                            {filteredOptions.map((option) => (
+                                                <option key={option} value={option} />
+                                            ))}
+                                        </datalist>
+                                    )}
+                                </>
+                            ) : options.length > 0 ? (
                                 <select
                                     value={selectedValue || ''}
                                     onChange={(e) => {
@@ -8709,6 +8993,7 @@ function TapnowApp() {
             supportsHD: false,
             apiType: 'openai',
             customParams: [],
+            asyncConfig: null,
             previewOverrideEnabled: false,
             previewOverridePatch: null,
             requestOverrideEnabled: false,
@@ -8731,6 +9016,40 @@ function TapnowApp() {
         });
     };
 
+    const duplicateModelLibraryEntry = (entryId) => {
+        const source = modelLibrary.find(entry => entry.id === entryId);
+        if (!source) return;
+        const baseId = `${source.id}-copy`;
+        let newId = baseId;
+        let counter = 1;
+        while (modelLibrary.some(entry => entry.id === newId)) {
+            newId = `${baseId}-${counter++}`;
+        }
+        const cloned = JSON.parse(JSON.stringify(source));
+        const displayBase = cloned.displayName || cloned.modelName || cloned.id || newId;
+        const newEntry = {
+            ...cloned,
+            id: newId,
+            displayName: `${displayBase}（复制）`,
+            modelName: cloned.modelName || cloned.id || newId,
+            customParams: normalizeCustomParams(cloned.customParams),
+            requestTemplate: normalizeRequestTemplate(cloned.requestTemplate || getDefaultRequestTemplateForEntry(cloned)),
+            previewOverridePatch: normalizePreviewOverridePatch(cloned.previewOverridePatch),
+            requestOverridePatch: normalizeRequestOverridePatch(cloned.requestOverridePatch)
+        };
+        setModelLibrary(prev => [...prev, newEntry]);
+        setEditingLibraryModels(prev => {
+            const next = new Set(prev);
+            next.add(newId);
+            return next;
+        });
+        setCollapsedLibraryModels(prev => {
+            const next = new Set(prev);
+            next.delete(newId);
+            return next;
+        });
+    };
+
     const isLibraryNotesCollapsed = useCallback((entryId, fieldKey) => {
         const key = `${entryId}:${fieldKey}`;
         return !!libraryNotesCollapsed[key];
@@ -8743,6 +9062,19 @@ function TapnowApp() {
             [key]: !prev[key]
         }));
     }, [extractLocalCacheRelPath]);
+
+    const isLibrarySectionCollapsed = useCallback((entryId, sectionKey) => {
+        const key = `${entryId}:${sectionKey}`;
+        return !!librarySectionCollapsed[key];
+    }, [librarySectionCollapsed]);
+
+    const toggleLibrarySectionCollapsed = useCallback((entryId, sectionKey) => {
+        const key = `${entryId}:${sectionKey}`;
+        setLibrarySectionCollapsed(prev => ({
+            ...prev,
+            [key]: !prev[key]
+        }));
+    }, []);
 
     const addModelLibraryCustomParam = (entryId) => {
         if (!entryId) return;
@@ -8909,6 +9241,16 @@ function TapnowApp() {
             if (!prev[id]) return prev;
             const { [id]: _removed, ...rest } = prev;
             return rest;
+        });
+    }, []);
+
+    const toggleLibraryAsyncPreview = useCallback((id) => {
+        if (!id) return;
+        setLibraryAsyncPreviewModels(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
         });
     }, []);
 
@@ -9962,6 +10304,71 @@ function TapnowApp() {
             return null;
         }
     };
+
+    const exportApiModelConfig = useCallback((config) => {
+        if (!config) return;
+        const { _uid, key, url, isCustom, ...rest } = config;
+        const payload = { ...rest };
+        const rawName = payload.id || payload.modelName || 'model';
+        const safeName = String(rawName).replace(/[^\w.-]+/g, '_');
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const fileName = `tapnow-model-${safeName}.json`;
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = fileName;
+        link.click();
+        URL.revokeObjectURL(link.href);
+    }, []);
+
+    const importApiModelConfigs = useCallback((providerKey) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            try {
+                const text = await file.text();
+                const data = JSON.parse(text);
+                const rawList = Array.isArray(data)
+                    ? data
+                    : Array.isArray(data?.models)
+                        ? data.models
+                        : [data];
+                const normalized = rawList
+                    .map((item) => {
+                        if (!item || typeof item !== 'object') return null;
+                        const cleaned = { ...item };
+                        delete cleaned._uid;
+                        delete cleaned.key;
+                        delete cleaned.url;
+                        delete cleaned.isCustom;
+                        const id = cleaned.id || cleaned.modelName;
+                        if (!id) return null;
+                        return {
+                            ...cleaned,
+                            id,
+                            provider: providerKey || cleaned.provider,
+                            type: cleaned.type || 'Chat',
+                            modelName: cleaned.modelName || id,
+                            displayName: cleaned.displayName || cleaned.modelName || id,
+                            customParams: normalizeCustomParams(cleaned.customParams),
+                            _uid: `uid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+                        };
+                    })
+                    .filter(Boolean);
+                if (normalized.length === 0) {
+                    showToast('未找到可导入的模型配置', 'warning', 2000);
+                    return;
+                }
+                setApiConfigs(prev => [...prev, ...normalized]);
+                showToast(`已导入 ${normalized.length} 个模型`, 'success', 3000);
+            } catch (err) {
+                showToast(`导入失败: ${err.message}`, 'error', 3000);
+            }
+        };
+        input.click();
+    }, [showToast]);
 
     const resolveHistoryPayloadUrl = useCallback((payload, specificUrl = null) => {
         if (!payload) return '';
@@ -11270,6 +11677,7 @@ function TapnowApp() {
                                             durationMs,
                                             errorMsg: null,
                                             sourceNodeId: savedSourceNodeId || hItem.sourceNodeId, // 确保sourceNodeId被保留
+                                            output_images: imageUrls,
                                             ...(imageUrls.length > 1 ? { mjImages: imageUrls, selectedMjImageIndex: 0 } : {})
                                         };
                                     } else {
@@ -11367,7 +11775,8 @@ function TapnowApp() {
                                             height: h,
                                             durationMs,
                                             errorMsg: null,
-                                            sourceNodeId: savedSourceNodeId || hItem.sourceNodeId // 确保sourceNodeId被保留
+                                            sourceNodeId: savedSourceNodeId || hItem.sourceNodeId, // 确保sourceNodeId被保留
+                                            output_images: [foundUrl]
                                         };
                                     }
                                 }
@@ -11491,6 +11900,188 @@ function TapnowApp() {
             .catch((err) => {
                 console.error('[Async Image] Poll error:', err);
                 setTimeout(() => pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, sourceNodeId, attempt + 1, isBananaModel), baseDelayMs);
+            });
+    };
+
+    const buildAsyncRequest = (asyncRequest, vars, providerKey) => {
+        if (!asyncRequest || !asyncRequest.endpoint) return null;
+        const templateRequest = buildRequestFromTemplate(asyncRequest, vars, { bodyType: asyncRequest.bodyType });
+        if (!templateRequest || !templateRequest.url) return null;
+        const providerBaseUrl = (vars?.provider?.baseUrl || '').replace(/\/+$/, '');
+        let fullUrl = templateRequest.url;
+        if (!/^https?:/i.test(fullUrl)) {
+            fullUrl = `${providerBaseUrl}${fullUrl.startsWith('/') ? '' : '/'}${fullUrl}`;
+        }
+        fullUrl = buildProxyUrl(fullUrl, providerKey);
+        const headers = templateRequest.headers && typeof templateRequest.headers === 'object'
+            ? { ...templateRequest.headers }
+            : {};
+        if (vars?.provider?.key && !headers.Authorization && !headers.authorization) {
+            headers.Authorization = `Bearer ${vars.provider.key}`;
+        }
+        const method = (templateRequest.method || asyncRequest.method || 'GET').toString().toUpperCase();
+        let body = templateRequest.body;
+        let bodyType = (templateRequest.bodyType || asyncRequest.bodyType || 'json').toString().toLowerCase();
+        if (bodyType === 'multipart') {
+            body = coerceFormDataFromObject(body);
+            delete headers['Content-Type'];
+            delete headers['content-type'];
+        } else if (bodyType === 'raw') {
+            if (typeof body !== 'string') {
+                body = JSON.stringify(body ?? {});
+            }
+        } else if (bodyType === 'json') {
+            if (!(body instanceof FormData) && typeof body !== 'string') {
+                body = JSON.stringify(body ?? {});
+            }
+            if (!headers['Content-Type'] && !headers['content-type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+        }
+        if (method === 'GET' || method === 'HEAD') {
+            body = undefined;
+        }
+        return {
+            url: fullUrl,
+            method,
+            headers,
+            body
+        };
+    };
+
+    const pollAsyncTask = (taskId, requestId, asyncConfig, baseVars, w, h, sourceNodeId, providerKey, attempt = 0) => {
+        const maxAttempts = Number.isFinite(asyncConfig?.maxAttempts) ? asyncConfig.maxAttempts : 300;
+        const delayMs = Number.isFinite(asyncConfig?.pollIntervalMs) ? asyncConfig.pollIntervalMs : 3000;
+        if (attempt > maxAttempts) {
+            setHistory((prev) => prev.map((hItem) =>
+                hItem.id === taskId
+                    ? { ...hItem, status: 'failed', errorMsg: '异步任务轮询超时' }
+                    : hItem
+            ));
+            return;
+        }
+        if (!asyncConfig?.statusRequest?.endpoint) {
+            setHistory((prev) => prev.map((hItem) =>
+                hItem.id === taskId
+                    ? { ...hItem, status: 'failed', errorMsg: '异步任务未配置状态查询接口' }
+                    : hItem
+            ));
+            return;
+        }
+        const vars = { ...baseVars, requestId };
+        const statusReq = buildAsyncRequest(asyncConfig.statusRequest, vars, providerKey);
+        if (!statusReq) {
+            setHistory((prev) => prev.map((hItem) =>
+                hItem.id === taskId
+                    ? { ...hItem, status: 'failed', errorMsg: '异步任务状态请求构建失败' }
+                    : hItem
+            ));
+            return;
+        }
+
+        fetch(statusReq.url, { method: statusReq.method, headers: statusReq.headers, body: statusReq.body })
+            .then((resp) => resp.text())
+            .then(async (text) => {
+                let statusData;
+                try {
+                    statusData = text ? JSON.parse(text) : {};
+                } catch (err) {
+                    console.warn('[Async Task] 状态响应解析失败', err);
+                    setTimeout(() => pollAsyncTask(taskId, requestId, asyncConfig, baseVars, w, h, sourceNodeId, providerKey, attempt + 1), delayMs);
+                    return;
+                }
+
+                const statusRaw = getValueByPath(statusData, asyncConfig.statusPath);
+                const statusValue = normalizeAsyncStatusValue(statusRaw);
+                const isCompleted = asyncConfig.successValues.includes(statusValue);
+                const isFailed = asyncConfig.failureValues.includes(statusValue);
+                const errorMessage = asyncConfig.errorPath ? (getValueByPath(statusData, asyncConfig.errorPath) || '') : '';
+
+                if (isCompleted) {
+                    let outputsData = statusData;
+                    if (asyncConfig.outputsRequest?.endpoint) {
+                        const outputsReq = buildAsyncRequest(asyncConfig.outputsRequest, vars, providerKey);
+                        if (!outputsReq) {
+                            throw new Error('异步任务结果请求构建失败');
+                        }
+                        const outputsResp = await fetch(outputsReq.url, { method: outputsReq.method, headers: outputsReq.headers, body: outputsReq.body });
+                        const outputsText = await outputsResp.text();
+                        outputsData = outputsText ? JSON.parse(outputsText) : {};
+                    }
+                    const outputsValue = asyncConfig.outputsPath ? getValueByPath(outputsData, asyncConfig.outputsPath) : outputsData;
+                    const imageUrls = extractAsyncOutputUrls(outputsValue, asyncConfig.outputsUrlField);
+
+                    if (imageUrls.length === 0) {
+                        throw new Error('异步任务未返回结果');
+                    }
+
+                    setHistory((prev) => {
+                        const updated = prev.map((hItem) => {
+                            if (hItem.id !== taskId) return hItem;
+                            const storyboardTask = storyboardTaskMapRef.current.get(taskId);
+                            const hasStoryboardTask = !!storyboardTask;
+                            const endTime = Date.now();
+                            const durationMs = endTime - (hItem.startTime || endTime);
+
+                            if (hasStoryboardTask) {
+                                if (storyboardTask.isImageMode) {
+                                    updateShot(storyboardTask.nodeId, storyboardTask.shotId, {
+                                        output_images: imageUrls,
+                                        output_url: imageUrls[0],
+                                        selectedImageIndex: 0,
+                                        outputEnabled: false,
+                                        status: 'done',
+                                        durationCost: durationMs / 1000
+                                    });
+                                    storyboardTaskMapRef.current.delete(taskId);
+                                }
+                            }
+
+                            const updatedItem = {
+                                ...hItem,
+                                status: 'completed',
+                                progress: 100,
+                                url: imageUrls[0],
+                                width: w,
+                                height: h,
+                                durationMs,
+                                output_images: imageUrls,
+                                mjImages: imageUrls.length > 1 ? imageUrls : null,
+                                selectedMjImageIndex: 0
+                            };
+
+                            if (updatedItem.sourceNodeId && !hasStoryboardTask) {
+                                setTimeout(() => {
+                                    updatePreviewFromTask(taskId, imageUrls[0], 'image', updatedItem.sourceNodeId, updatedItem.mjImages);
+                                }, 0);
+                            }
+                            return updatedItem;
+                        });
+                        return updated;
+                    });
+                    return;
+                }
+
+                if (isFailed) {
+                    setHistory((prev) => prev.map((hItem) =>
+                        hItem.id === taskId
+                            ? { ...hItem, status: 'failed', errorMsg: errorMessage || `任务失败: ${statusValue || 'FAILED'}` }
+                            : hItem
+                    ));
+                    return;
+                }
+
+                setHistory((prev) => prev.map((hItem) => {
+                    if (hItem.id !== taskId) return hItem;
+                    const progress = Math.min(95, Math.max(10, 10 + attempt * 2));
+                    return { ...hItem, status: 'generating', progress, errorMsg: null };
+                }));
+
+                setTimeout(() => pollAsyncTask(taskId, requestId, asyncConfig, baseVars, w, h, sourceNodeId, providerKey, attempt + 1), delayMs);
+            })
+            .catch((err) => {
+                console.error('[Async Task] Poll error:', err);
+                setTimeout(() => pollAsyncTask(taskId, requestId, asyncConfig, baseVars, w, h, sourceNodeId, providerKey, attempt + 1), delayMs);
             });
     };
 
@@ -12217,11 +12808,13 @@ function TapnowApp() {
                 const requestTemplate = normalizeRequestTemplate(config?.requestTemplate);
                 const requestOverrideEnabled = !!config?.requestOverrideEnabled;
                 const requestOverridePatch = normalizeRequestOverridePatch(config?.requestOverridePatch);
+                const requestTemplateEnabled = !!requestTemplate?.enabled;
                 const isModelScope = apiType === 'modelscope';
                 const isGeminiNative = apiType === 'gemini';
                 const isChatImage = config?.type === 'ChatImage';
                 const useAsync = isModelScope ? forceAsync : false;
                 const resolveSourceProxy = (url) => getProxyPreferenceForUrl(url, useProxy);
+                const asyncConfig = normalizeAsyncConfig(config?.asyncConfig);
 
                 // --- 模型特征定义 (融合 V2.5-3 和 V2.5-4) ---
                 // isBananaLike: 用于旧版/通用香蕉模型 (排除 nano-banana-2)
@@ -12230,7 +12823,8 @@ function TapnowApp() {
                 const isFluxKontext = modelId.includes('flux') || (config?.modelName ?? '').includes('flux-kontext');
                 // isNanoBanana2: V2.5-4 新增的异步模型标识
                 const isNanoBanana2 = (config?.modelName ?? '').includes('nano-banana-2') || modelId.includes('nano-banana-2');
-                const isMidjourney = modelId.includes('mj') || (config?.provider ?? '').toLowerCase().includes('midjourney');
+                const isMidjourney = !requestTemplateEnabled
+                    && (modelId.includes('mj') || (config?.provider ?? '').toLowerCase().includes('midjourney'));
                 const isJimeng = modelId.includes('jimeng') || (config?.modelName ?? '').includes('jimeng') || config?.provider === 'jimeng';
 
                 // 辅助函数
@@ -12649,6 +13243,54 @@ function TapnowApp() {
                     payload = applyPreviewOverridePatch(payload, config.previewOverridePatch);
                 }
 
+                const buildAsyncTemplateVars = () => {
+                    const vars = {
+                        modelName: config?.modelName || modelId,
+                        prompt: prompt || '',
+                        ratio,
+                        resolution,
+                        size: sizeStr,
+                        duration: type === 'video' ? duration : undefined,
+                        durationNumber: normalizeDurationValue(duration, 5),
+                        seed: node?.settings?.seed,
+                        n: 1,
+                        provider: {
+                            key: apiKey,
+                            baseUrl,
+                            id: credentials.provider,
+                            useProxy
+                        }
+                    };
+                    const inputImages = connectedImages.length > 0
+                        ? connectedImages
+                        : (sourceImage ? [sourceImage] : []);
+                    const imageSources = inputImages.filter(Boolean);
+                    if (imageSources.length > 0) {
+                        vars.imageUrl = imageSources[0];
+                        vars.imageUrls = imageSources;
+                        vars.imagesUrl = imageSources;
+                        vars.imagesUrls = imageSources;
+                        imageSources.forEach((url, idx) => {
+                            const index = idx + 1;
+                            vars[`imageUrl${index}`] = url;
+                            vars[`image${index}Url`] = url;
+                        });
+                    }
+                    if (finalMaskBlob) {
+                        vars.maskBlob = finalMaskBlob;
+                    }
+                    if (customParams.length > 0 && customParamSelections) {
+                        customParams.forEach((param) => {
+                            const name = String(param?.name || '').trim();
+                            if (!name) return;
+                            const value = getCustomParamSelection(param, customParamSelections);
+                            if (value === '' || value === undefined || value === null) return;
+                            vars[name] = value;
+                        });
+                    }
+                    return vars;
+                };
+
                 let requestOverride = null;
                 if (requestTemplate?.enabled) {
                     const buildRequestTemplateVars = async () => {
@@ -12678,6 +13320,11 @@ function TapnowApp() {
                             vars.imageUrls = imageSources;
                             vars.imagesUrl = imageSources;
                             vars.imagesUrls = imageSources;
+                            imageSources.forEach((url, idx) => {
+                                const index = idx + 1;
+                                vars[`imageUrl${index}`] = url;
+                                vars[`image${index}Url`] = url;
+                            });
                         }
                         if (finalMaskBlob) {
                             vars.maskBlob = finalMaskBlob;
@@ -12695,6 +13342,11 @@ function TapnowApp() {
                             vars.imageBlob = blobs[0];
                             vars.imageBlobs = blobs;
                             vars.imagesBlob = blobs;
+                            blobs.forEach((blob, idx) => {
+                                const index = idx + 1;
+                                vars[`imageBlob${index}`] = blob;
+                                vars[`image${index}Blob`] = blob;
+                            });
                         }
                         if (needsDataUrl && imageSources.length > 0) {
                             const dataUrls = await Promise.all(imageSources.map(async (url) => {
@@ -12714,6 +13366,13 @@ function TapnowApp() {
                             vars.imageDataUrls = dataUrls;
                             vars.imagesDataUrl = dataUrls;
                             vars.imagesDataURL = dataUrls;
+                            dataUrls.forEach((dataUrl, idx) => {
+                                const index = idx + 1;
+                                vars[`imageDataUrl${index}`] = dataUrl;
+                                vars[`imageDataURL${index}`] = dataUrl;
+                                vars[`image${index}DataUrl`] = dataUrl;
+                                vars[`image${index}DataURL`] = dataUrl;
+                            });
                         }
                         if (customParams.length > 0 && customParamSelections) {
                             customParams.forEach((param) => {
@@ -12757,7 +13416,7 @@ function TapnowApp() {
                     }
 
                     if (currentApiKey && !overrideHeaders.Authorization && !overrideHeaders.authorization) {
-                        overrideHeaders.Authorization = `Bearer ${currentApiKey} `;
+                        overrideHeaders.Authorization = `Bearer ${currentApiKey}`;
                     }
                     if (overrideBodyType === 'json' && !overrideHeaders['Content-Type'] && !overrideHeaders['content-type']) {
                         overrideHeaders['Content-Type'] = 'application/json';
@@ -12775,7 +13434,7 @@ function TapnowApp() {
                         }
                     } else {
                         const cleanBaseUrl = currentBaseUrl.replace(/\/+$/, '');
-                        fullUrl = `${cleanBaseUrl}${overrideUrl.startsWith('/') ? overrideUrl : '/' + overrideUrl} `;
+                        fullUrl = `${cleanBaseUrl}${overrideUrl.startsWith('/') ? overrideUrl : '/' + overrideUrl}`;
                     }
 
                     if (overrideBodyType === 'multipart') {
@@ -12975,6 +13634,19 @@ function TapnowApp() {
                     ));
                     pollImageTask(taskId, taskIdForPoll, baseUrl, apiKey, w, h, actualSourceNodeId, 0, true);
                     return;
+                }
+
+                if (asyncConfig?.enabled) {
+                    const requestId = getValueByPathAny(data, asyncConfig.requestIdPaths);
+                    if (requestId) {
+                        const asyncVars = buildAsyncTemplateVars();
+                        asyncVars.requestId = requestId;
+                        setHistory((prev) => prev.map((hItem) =>
+                            hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: requestId } : hItem
+                        ));
+                        pollAsyncTask(taskId, requestId, asyncConfig, asyncVars, w, h, actualSourceNodeId, providerKey, 0);
+                        return;
+                    }
                 }
 
                 let imageUrls = [];
@@ -13205,6 +13877,7 @@ function TapnowApp() {
                                 width: w,
                                 height: h,
                                 durationMs,
+                                output_images: imageUrls,
                                 mjImages: imageUrls.length > 1 ? imageUrls : null,
                                 selectedMjImageIndex: 0
                             };
@@ -13426,7 +14099,7 @@ function TapnowApp() {
                         const resp = await fetch(endpoint, {
                             method: 'POST',
                             headers: {
-                                Authorization: `Bearer ${apiKey} `,
+                                Authorization: `Bearer ${apiKey}`,
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify(veoPayload)
@@ -13459,7 +14132,7 @@ function TapnowApp() {
 
                 let endpoint = '';
                 let body;
-                const headers = { Authorization: `Bearer ${apiKey} ` };
+                const headers = { Authorization: `Bearer ${apiKey}` };
                 // 统一将时长转为纯数字秒，避免后端期望 int 时收到字符串
                 const durationValueNum = (() => {
                     if (duration === null || duration === undefined) return 8;
@@ -13520,7 +14193,7 @@ function TapnowApp() {
                     const resp = await fetch(endpoint, {
                         method: 'POST',
                         headers: {
-                            'Authorization': `Bearer ${apiKey} `,
+                            'Authorization': `Bearer ${apiKey}`,
                             'Content-Type': 'application/json' // 必须是 JSON
                         },
                         body: JSON.stringify(payload)
@@ -13903,7 +14576,7 @@ function TapnowApp() {
                 }
 
                 if (apiKey && !overrideHeaders.Authorization && !overrideHeaders.authorization) {
-                    overrideHeaders.Authorization = `Bearer ${apiKey} `;
+                    overrideHeaders.Authorization = `Bearer ${apiKey}`;
                 }
                 if (overrideBodyType === 'json' && !overrideHeaders['Content-Type'] && !overrideHeaders['content-type']) {
                     overrideHeaders['Content-Type'] = 'application/json';
@@ -15140,8 +15813,8 @@ function TapnowApp() {
             const normalizedLibrary = (tempState.modelLibrary || [])
                 .map((entry) => ({
                     id: entry.id,
-                    displayName: entry.displayName || entry.id,
-                    modelName: entry.modelName || entry.id,
+                    displayName: entry.displayName || entry.modelName || entry.id,
+                    modelName: entry.modelName || entry.displayName || entry.id,
                     type: entry.type || 'Chat',
                     apiType: entry.apiType || 'openai',
                     ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
@@ -15159,6 +15832,7 @@ function TapnowApp() {
                     supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                     supportsHD: !!entry.supportsHD,
                     customParams: normalizeCustomParams(entry.customParams),
+                    asyncConfig: entry.asyncConfig && typeof entry.asyncConfig === 'object' ? entry.asyncConfig : null,
                     requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
                     requestOverrideEnabled: !!entry.requestOverrideEnabled,
                     requestOverridePatch: normalizeRequestOverridePatch(entry.requestOverridePatch),
@@ -15834,7 +16508,7 @@ function TapnowApp() {
             || resolveModelKey(apiConfigs.find(c => c.type === 'Video')?.id)
             || '';
         const defaultImageModel = resolveModelKey(lastUsedImageModel) || resolveModelKey(apiConfigs.find(c => isImageModelType(c.type))?.id) || '';
-        const defaultChatModel = resolveModelKey(lastUsedExtractModel) || resolveModelKey(apiConfigs.find(c => c.type === 'Chat')?.id) || '';
+        const defaultChatModel = resolveModelKey(lastUsedExtractModel) || resolveModelKey(apiConfigs.find(c => isChatModelType(c.type))?.id) || '';
         const defaultRatio = lastUsedRatio || '16:9';
         const defaultVideoResolution = lastUsedVideoResolution || '720p';
         const defaultImageResolution = lastUsedImageResolution || '2K';
@@ -16483,7 +17157,7 @@ function TapnowApp() {
             const resp = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${apiKey} `,
+                    'Authorization': `Bearer ${apiKey}`,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(payload)
@@ -16800,7 +17474,7 @@ function TapnowApp() {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiKey} `
+                    'Authorization': `Bearer ${apiKey}`
                 },
                 body: JSON.stringify(imaginePayload)
             });
@@ -17506,19 +18180,19 @@ ${inputText.substring(0, 15000)} ... (截断)
         }
 
         // 强制使用 gemini-3-pro 模型（支持视频输入）
-        let config = apiConfigs.find((c) => c.id === 'gemini-3-pro' && c.type === 'Chat');
+        let config = apiConfigs.find((c) => c.id === 'gemini-3-pro' && isChatModelType(c.type));
 
         // 如果没有找到 gemini-3-pro，尝试其他 gemini 模型
         if (!config) {
             config = apiConfigs.find((c) => {
                 const modelId = c.id?.toLowerCase() || '';
-                return modelId.includes('gemini') && c.type === 'Chat';
+                return modelId.includes('gemini') && isChatModelType(c.type);
             });
         }
 
         // 如果还是没有，使用默认配置
         if (!config) {
-            config = apiConfigs.find((c) => c.type === 'Chat');
+            config = apiConfigs.find((c) => isChatModelType(c.type));
         }
 
         // V3.4.8: 使用 getApiCredentials 获取 Provider 配置
@@ -20742,7 +21416,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                                 onMouseDown={(e) => e.stopPropagation()}
                                             >
-                                                <span className="truncate font-mono">{getModelLabel(node.settings?.model)}</span>
+                                                <span className="truncate font-mono">{getModelLabelWithProvider(node.settings?.model)}</span>
                                                 <ChevronDown size={12} className="opacity-50 shrink-0" />
                                             </button>
                                             {activeDropdown?.nodeId === node.id && activeDropdown.type === 'extract-model' && (
@@ -20757,7 +21431,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     {/* Provider 列表 */}
                                                     <div className={`w-24 border-r pr-1 max-h-80 overflow-y-auto custom-scrollbar flex flex-col ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                         {Object.entries(groupedApiConfigs)
-                                                            .filter(([, group]) => group.models.some(m => m.type === 'Chat'))
+                                                            .filter(([, group]) => group.models.some(m => isChatModelType(m.type)))
                                                             .map(([providerKey, group]) => (
                                                                 <button
                                                                     key={providerKey}
@@ -20774,7 +21448,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     {/* Model 列表 */}
                                                     <div className="flex-1 pl-1 max-h-80 overflow-y-auto custom-scrollbar">
                                                         {hoveredProvider && groupedApiConfigs[hoveredProvider]?.models
-                                                            .filter(m => m.type === 'Chat')
+                                                            .filter(m => isChatModelType(m.type))
                                                             .map((m) => {
                                                                 const modelKey = m._uid || m.id;
                                                                 const currentModelKey = resolveModelKey(node.settings?.model);
@@ -21031,7 +21705,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             }`}
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                     >
-                                                        <span className="truncate font-mono">{getModelLabel(node.settings?.chatModel)}</span>
+                                                        <span className="truncate font-mono">{getModelLabelWithProvider(node.settings?.chatModel)}</span>
                                                         <ChevronDown size={12} className="opacity-50 shrink-0" />
                                                     </button>
                                                     {activeDropdown?.nodeId === node.id && activeDropdown.type === 'desc-model' && (
@@ -21045,7 +21719,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         >
                                                             <div className={`w-24 border-r pr-1 max-h-80 overflow-y-auto custom-scrollbar flex flex-col ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                                 {Object.entries(groupedApiConfigs)
-                                                                    .filter(([, group]) => group.models.some(m => m.type === 'Chat'))
+                                                                    .filter(([, group]) => group.models.some(m => isChatModelType(m.type)))
                                                                     .map(([providerKey, group]) => (
                                                                         <button
                                                                             key={providerKey}
@@ -21061,7 +21735,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             </div>
                                                             <div className="flex-1 pl-1 max-h-80 overflow-y-auto custom-scrollbar">
                                                                 {hoveredProvider && groupedApiConfigs[hoveredProvider]?.models
-                                                                    .filter(m => m.type === 'Chat')
+                                                                    .filter(m => isChatModelType(m.type))
                                                                     .map((m) => {
                                                                         const modelKey = m._uid || m.id;
                                                                         const currentModelKey = resolveModelKey(node.settings?.chatModel);
@@ -21272,7 +21946,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             }`}
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                     >
-                                                        <span className="truncate font-mono">{getModelLabel(modelId)}</span>
+                                                        <span className="truncate font-mono">{getModelLabelWithProvider(modelId)}</span>
                                                         <ChevronDown size={12} className="opacity-50 shrink-0" />
                                                     </button>
                                                     {activeDropdown?.nodeId === node.id && activeDropdown.type === 'role-video-model' && (
@@ -21545,7 +22219,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             }`}
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                     >
-                                                        <span className="truncate font-mono">{getModelLabel(modelId)}</span>
+                                                        <span className="truncate font-mono">{getModelLabelWithProvider(modelId)}</span>
                                                         <ChevronDown size={12} className="opacity-50 shrink-0" />
                                                     </button>
                                                     {activeDropdown?.nodeId === node.id && activeDropdown.type === 'role-image-model' && (
@@ -22855,7 +23529,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         {/* Provider 列表 */}
                                                                         <div className={`w-24 border-r pr-1 max-h-80 overflow-y-auto custom-scrollbar ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                                             {Object.entries(groupedApiConfigs)
-                                                                                .filter(([, group]) => group.models.some(m => m.type === 'Chat'))
+                                                                                .filter(([, group]) => group.models.some(m => isChatModelType(m.type)))
                                                                                 .map(([providerKey, group]) => (
                                                                                     <button
                                                                                         key={providerKey}
@@ -22872,7 +23546,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         {/* Model 列表 */}
                                                                         <div className="flex-1 pl-1 max-h-80 overflow-y-auto custom-scrollbar">
                                                                             {hoveredProvider && groupedApiConfigs[hoveredProvider]?.models
-                                                                                .filter(m => m.type === 'Chat')
+                                                                                .filter(m => isChatModelType(m.type))
                                                                                 .map((m) => {
                                                                                     const modelKey = m._uid || m.id;
                                                                                     const currentModelKey = resolveModelKey(node.settings?.model);
@@ -28432,7 +29106,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 ? 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:border-zinc-600'
                                                 : 'bg-white text-zinc-800 border-zinc-300 hover:border-zinc-400'}`}
                                         >
-                                            <span className="truncate font-mono">{getModelLabel(chatModel)}</span>
+                                            <span className="truncate font-mono">{getModelLabelWithProvider(chatModel)}</span>
                                             <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${getStatusColor(resolveModelKey(chatModel))}`}></div>
                                             <ChevronDown size={12} className="shrink-0 opacity-50" />
                                         </button>
@@ -28446,7 +29120,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 {/* Provider 列表 */}
                                                 <div className={`w-24 border-r pr-1 max-h-64 overflow-y-auto custom-scrollbar flex flex-col ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-200'}`}>
                                                     {Object.entries(groupedApiConfigs)
-                                                        .filter(([, group]) => group.models.some(m => m.type === 'Chat'))
+                                                        .filter(([, group]) => group.models.some(m => isChatModelType(m.type)))
                                                         .map(([providerKey, group]) => (
                                                             <button
                                                                 key={providerKey}
@@ -28462,7 +29136,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 {/* Model 列表 */}
                                                 <div className="flex-1 pl-1 max-h-64 overflow-y-auto custom-scrollbar">
                                                     {chatHoveredProvider && groupedApiConfigs[chatHoveredProvider]?.models
-                                                        .filter(m => m.type === 'Chat')
+                                                        .filter(m => isChatModelType(m.type))
                                                         .map((m) => {
                                                             const modelKey = m._uid || m.id;
                                                             const currentModelKey = resolveModelKey(chatModel);
@@ -29710,8 +30384,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     const normalizedLibrary = data.modelLibrary
                                                                         .map((entry) => ({
                                                                             id: entry.id,
-                                                                            displayName: entry.displayName || entry.id,
-                                                                            modelName: entry.modelName || entry.id,
+                                                                            displayName: entry.displayName || entry.modelName || entry.id,
+                                                                            modelName: entry.modelName || entry.displayName || entry.id,
                                                                             type: entry.type || 'Chat',
                                                                             apiType: entry.apiType || 'openai',
                                                                             ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
@@ -29729,6 +30403,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                                                                             supportsHD: !!entry.supportsHD,
                                                                             customParams: normalizeCustomParams(entry.customParams),
+                                                                            asyncConfig: entry.asyncConfig && typeof entry.asyncConfig === 'object' ? entry.asyncConfig : null,
                                                                             previewOverrideEnabled: !!entry.previewOverrideEnabled,
                                                                             previewOverridePatch: normalizePreviewOverridePatch(entry.previewOverridePatch),
                                                                             requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
@@ -30087,28 +30762,38 @@ ${inputText.substring(0, 15000)} ... (截断)
 
                                                     <div className="flex items-center justify-between mb-2">
                                                         <div className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('模型')}</div>
-                                                        <button
-                                                            onClick={() => {
-                                                                const newId = `${providerKey}-${Date.now()}`;
-                                                                const uid = `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-                                                                setApiConfigs(prev => [...prev, {
-                                                                    id: newId,
-                                                                    provider: providerKey,
-                                                                    type: 'Chat',
-                                                                    _uid: uid
-                                                                }]);
-                                                                setApiModelEditing(uid, true);
-                                                            }}
-                                                            className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
-                                                        >
-                                                            <Plus size={10} /> {t('添加模型')}
-                                                        </button>
+                                                        <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={() => importApiModelConfigs(providerKey)}
+                                                                className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
+                                                            >
+                                                                <UploadCloud size={10} /> {t('导入模型')}
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    const newId = `${providerKey}-${Date.now()}`;
+                                                                    const uid = `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                                                                    setApiConfigs(prev => [...prev, {
+                                                                        id: newId,
+                                                                        provider: providerKey,
+                                                                        type: 'Chat',
+                                                                        _uid: uid
+                                                                    }]);
+                                                                    setApiModelEditing(uid, true);
+                                                                }}
+                                                                className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
+                                                            >
+                                                                <Plus size={10} /> {t('添加模型')}
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                     <div className="space-y-1.5">
                                                         {group.models.map(api => {
                                                             const isEditing = editingApiModels.has(api._uid);
                                                             const libraryLabel = api.libraryId
-                                                                ? (modelLibraryMap.get(api.libraryId)?.displayName || api.libraryId)
+                                                                ? (modelLibraryMap.get(api.libraryId)?.displayName
+                                                                    || modelLibraryMap.get(api.libraryId)?.modelName
+                                                                    || api.libraryId)
                                                                 : '';
                                                             const resolvedApiType = api.apiType || providers[providerKey]?.apiType || 'openai';
                                                             const statusKey = api._uid || api.id;
@@ -30165,7 +30850,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             >
                                                                                 <option value="">{t('不引用模型库')}</option>
                                                                                 {modelLibrary.map((entry) => (
-                                                                                    <option key={entry.id} value={entry.id}>{entry.displayName || entry.id}</option>
+                                                                                    <option key={entry.id} value={entry.id}>{entry.displayName || entry.modelName || entry.id}</option>
                                                                                 ))}
                                                                             </select>
                                                                             <select
@@ -30181,6 +30866,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             </select>
                                                                         </div>
                                                                         <div className="flex items-center gap-1">
+                                                                            <button
+                                                                                onClick={() => exportApiModelConfig(api)}
+                                                                                className={`px-1.5 py-0.5 rounded text-[9px] ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                                title={t('导出该模型')}
+                                                                            >
+                                                                                <Download size={10} />
+                                                                            </button>
                                                                             <button
                                                                                 onClick={() => setApiModelEditing(api._uid, !isEditing)}
                                                                                 className={`px-1.5 py-0.5 rounded text-[9px] ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
@@ -30310,6 +31002,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     imageUrl: 'https://example.com/image.png',
                                                     imageDataUrl: 'data:image/png;base64,PLACEHOLDER'
                                                 };
+                                                vars.imageUrl1 = vars.imageUrl;
+                                                vars.imageUrl2 = vars.imageUrl;
+                                                vars.image1Url = vars.imageUrl;
+                                                vars.image2Url = vars.imageUrl;
+                                                vars.imageUrls = [vars.imageUrl];
+                                                vars.imagesUrl = vars.imageUrls;
+                                                vars.imagesUrls = vars.imageUrls;
                                                 if (customParams.length > 0) {
                                                     customParams.forEach((param) => {
                                                         const name = String(param?.name || '').trim();
@@ -30341,6 +31040,29 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 timeoutMs: requestTemplateValue?.timeoutMs ?? '',
                                                 responseParser: requestTemplateValue?.responseParser || ''
                                             };
+                                            const asyncConfigValue = normalizeAsyncConfig(entry.asyncConfig);
+                                            const asyncConfigEnabled = !!asyncConfigValue?.enabled;
+                                            const asyncConfigDraft = libraryAsyncConfigDrafts[entry.id] || (
+                                                asyncConfigValue
+                                                    ? JSON.stringify(asyncConfigValue, null, 2)
+                                                    : ASYNC_CONFIG_TEMPLATE_TEXT
+                                            );
+                                            const isAsyncPreviewOpen = libraryAsyncPreviewModels.has(entry.id);
+                                            const isRequestTemplateCollapsed = isLibrarySectionCollapsed(entry.id, 'request-template');
+                                            const isAsyncSectionCollapsed = isLibrarySectionCollapsed(entry.id, 'async-task');
+                                            const asyncPreviewVars = {
+                                                requestId: 'REQUEST_ID',
+                                                prompt: '示例提示词',
+                                                provider: { key: 'API_KEY', baseUrl: 'https://api.example.com' }
+                                            };
+                                            const asyncStatusPreviewRaw = asyncConfigValue?.statusRequest
+                                                ? buildRequestFromTemplate(asyncConfigValue.statusRequest, asyncPreviewVars, { bodyType: asyncConfigValue.statusRequest.bodyType })
+                                                : null;
+                                            const asyncStatusPreview = formatRequestPreview(asyncStatusPreviewRaw);
+                                            const asyncOutputsPreviewRaw = asyncConfigValue?.outputsRequest
+                                                ? buildRequestFromTemplate(asyncConfigValue.outputsRequest, asyncPreviewVars, { bodyType: asyncConfigValue.outputsRequest.bodyType })
+                                                : null;
+                                            const asyncOutputsPreview = formatRequestPreview(asyncOutputsPreviewRaw);
                                             const updateRequestTemplate = (updates) => {
                                                 const nextTemplate = normalizeRequestTemplate({
                                                     ...(requestTemplateValue || getDefaultRequestTemplateForEntry(entry)),
@@ -30400,6 +31122,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 title={isPreviewOpen ? t('隐藏请求预览') : t('查看请求预览')}
                                                             >
                                                                 <Code size={12} className={isPreviewOpen ? 'text-blue-500' : ''} />
+                                                            </button>
+                                                            <button
+                                                                onClick={() => duplicateModelLibraryEntry(entry.id)}
+                                                                className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                title={t('复制模型')}
+                                                            >
+                                                                <CopyPlus size={12} />
                                                             </button>
                                                             <button
                                                                 onClick={() => toggleLibraryModelCollapse(entry.id)}
@@ -30969,16 +31698,39 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 }`}>
                                                                 <div className="flex items-center justify-between mb-2">
                                                                     <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('请求模板')}</div>
-                                                                    <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={requestTemplateEnabled}
-                                                                            onChange={(e) => updateRequestTemplate({ enabled: e.target.checked })}
-                                                                            disabled={!isEditing}
-                                                                        />
-                                                                        <span>{t('启用')}</span>
-                                                                    </label>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                checked={requestTemplateEnabled}
+                                                                                onChange={(e) => updateRequestTemplate({ enabled: e.target.checked })}
+                                                                                disabled={!isEditing}
+                                                                            />
+                                                                            <span>{t('启用')}</span>
+                                                                        </label>
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                if (isRequestTemplateCollapsed) {
+                                                                                    toggleLibrarySectionCollapsed(entry.id, 'request-template');
+                                                                                }
+                                                                                toggleLibraryPreview(entry.id);
+                                                                            }}
+                                                                            className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                            title={isPreviewOpen ? t('隐藏请求预览') : t('查看请求预览')}
+                                                                        >
+                                                                            <Code size={12} className={isPreviewOpen ? 'text-blue-500' : ''} />
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => toggleLibrarySectionCollapsed(entry.id, 'request-template')}
+                                                                            className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                            title={isRequestTemplateCollapsed ? t('展开') : t('折叠')}
+                                                                        >
+                                                                            <ChevronDown size={12} className={`transition-transform ${isRequestTemplateCollapsed ? '' : 'rotate-180'}`} />
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
+                                                                {!isRequestTemplateCollapsed && (
+                                                                <>
                                                                 <div className="grid grid-cols-12 gap-2">
                                                                     <div className="col-span-7 space-y-1">
                                                                         <label className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('请求路径')}</label>
@@ -31218,6 +31970,134 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         </button>
                                                                     </div>
                                                                 </div>
+                                                                </>
+                                                                )}
+                                                            </div>
+                                                            <div className={`rounded-md border p-2 mt-3 ${theme === 'dark'
+                                                                ? 'bg-zinc-950/60 border-zinc-800'
+                                                                : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5]' : 'bg-zinc-50 border-zinc-200'
+                                                                }`}>
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('异步任务（通用轮询）')}</div>
+                                                                    <div className="flex items-center gap-2">
+                                                                        <label className={`flex items-center gap-1 text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                checked={asyncConfigEnabled}
+                                                                                onChange={(e) => {
+                                                                                    const enabled = e.target.checked;
+                                                                                    const baseConfig = asyncConfigValue || buildEmptyAsyncConfig();
+                                                                                    updateModelLibraryEntry(entry.id, { asyncConfig: { ...baseConfig, enabled } });
+                                                                                }}
+                                                                                disabled={!isEditing}
+                                                                            />
+                                                                            <span>{t('启用')}</span>
+                                                                        </label>
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                if (isAsyncSectionCollapsed) {
+                                                                                    toggleLibrarySectionCollapsed(entry.id, 'async-task');
+                                                                                }
+                                                                                toggleLibraryAsyncPreview(entry.id);
+                                                                            }}
+                                                                            className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                            title={isAsyncPreviewOpen ? t('隐藏预览') : t('查看预览')}
+                                                                        >
+                                                                            <Code size={12} className={isAsyncPreviewOpen ? 'text-blue-500' : ''} />
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => toggleLibrarySectionCollapsed(entry.id, 'async-task')}
+                                                                            className={`p-1 rounded ${theme === 'dark' ? 'text-zinc-500 hover:text-zinc-300' : 'text-zinc-400 hover:text-zinc-600'}`}
+                                                                            title={isAsyncSectionCollapsed ? t('展开') : t('折叠')}
+                                                                        >
+                                                                            <ChevronDown size={12} className={`transition-transform ${isAsyncSectionCollapsed ? '' : 'rotate-180'}`} />
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                                {!isAsyncSectionCollapsed && (
+                                                                    <>
+                                                                        <textarea
+                                                                            value={asyncConfigDraft}
+                                                                            onChange={(e) => setLibraryAsyncConfigDrafts(prev => ({ ...prev, [entry.id]: e.target.value }))}
+                                                                            disabled={!isEditing}
+                                                                            className={`w-full h-48 text-[9px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-200'
+                                                                                : 'bg-white border-zinc-300 text-zinc-800'
+                                                                                }`}
+                                                                        />
+                                                                        <div className="flex items-center justify-between mt-2">
+                                                                            <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500'}`}>
+                                                                                变量示例：{'{{requestId}}'}, {'{{provider.key}}'}, {'{{provider.baseUrl}}'}
+                                                                            </div>
+                                                                            <div className="flex items-center gap-2">
+                                                                                <button
+                                                                                    onClick={() => {
+                                                                                        try {
+                                                                                            const parsed = asyncConfigDraft ? JSON.parse(asyncConfigDraft) : {};
+                                                                                            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                                                                                                throw new Error('异步配置必须是对象');
+                                                                                            }
+                                                                                            updateModelLibraryEntry(entry.id, { asyncConfig: parsed });
+                                                                                            setLibraryAsyncConfigDrafts(prev => {
+                                                                                                const { [entry.id]: _removed, ...rest } = prev;
+                                                                                                return rest;
+                                                                                            });
+                                                                                            showToast('异步配置已保存', 'success', 2000);
+                                                                                        } catch (e) {
+                                                                                            showToast('异步配置 JSON 格式无效', 'error', 2000);
+                                                                                        }
+                                                                                    }}
+                                                                                    disabled={!isEditing}
+                                                                                    className={`px-2 py-1 rounded text-[9px] ${theme === 'dark'
+                                                                                        ? 'bg-zinc-700 text-zinc-200 hover:bg-zinc-600'
+                                                                                        : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
+                                                                                        } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                >
+                                                                                    {t('保存异步配置')}
+                                                                                </button>
+                                                                                <button
+                                                                                    onClick={() => {
+                                                                                        updateModelLibraryEntry(entry.id, { asyncConfig: null });
+                                                                                        setLibraryAsyncConfigDrafts(prev => {
+                                                                                            const { [entry.id]: _removed, ...rest } = prev;
+                                                                                            return rest;
+                                                                                        });
+                                                                                    }}
+                                                                                    disabled={!isEditing}
+                                                                                    className={`px-2 py-1 rounded text-[9px] ${theme === 'dark'
+                                                                                        ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                                                                        : 'bg-zinc-100 text-zinc-500 hover:bg-zinc-200'
+                                                                                        } ${!isEditing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                                                                >
+                                                                                    {t('重置')}
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                        {isAsyncPreviewOpen && (
+                                                                            <div className={`mt-2 rounded-md border p-2 ${theme === 'dark'
+                                                                                ? 'bg-zinc-950/60 border-zinc-800'
+                                                                                : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5]' : 'bg-zinc-50 border-zinc-200'
+                                                                                }`}>
+                                                                                <div className={`text-[9px] mb-1 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('状态请求预览')}</div>
+                                                                                {asyncStatusPreview ? (
+                                                                                    <pre className={`text-[9px] whitespace-pre-wrap ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                                                                        {JSON.stringify(asyncStatusPreview, null, 2)}
+                                                                                    </pre>
+                                                                                ) : (
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>{t('未配置')}</div>
+                                                                                )}
+                                                                                <div className={`text-[9px] mt-2 mb-1 ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('结果请求预览')}</div>
+                                                                                {asyncOutputsPreview ? (
+                                                                                    <pre className={`text-[9px] whitespace-pre-wrap ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
+                                                                                        {JSON.stringify(asyncOutputsPreview, null, 2)}
+                                                                                    </pre>
+                                                                                ) : (
+                                                                                    <div className={`text-[9px] ${theme === 'dark' ? 'text-zinc-600' : 'text-zinc-500'}`}>{t('未配置')}</div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+                                                                    </>
+                                                                )}
                                                             </div>
                                                             {isPreviewOpen && (
                                                                 <div className={`rounded-md border p-2 ${theme === 'dark'
