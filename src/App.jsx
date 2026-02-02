@@ -2491,14 +2491,22 @@ const resolveTemplateString = (value, vars, options = {}) => {
         const raw = getTemplateVarValue(vars, varType === 'blob' ? `${varName}Blob` : varName);
         return coerceTemplateValue(raw, varType, { bodyType: options.bodyType, fallbackBlobAsDataUrl: fallbackBlob });
     }
-    return value.replace(TEMPLATE_VAR_PATTERN, (_match, varName, varType) => {
+    return value.replace(TEMPLATE_VAR_PATTERN, (matchText, varName, varType, offset) => {
         const fallbackBlob = varType === 'blob'
             ? (getTemplateVarValue(vars, `${varName}DataUrl`) || getTemplateVarValue(vars, `${varName}DataURL`))
             : undefined;
         const raw = getTemplateVarValue(vars, varType === 'blob' ? `${varName}Blob` : varName);
         const coerced = coerceTemplateValue(raw, varType, { bodyType: options.bodyType, fallbackBlobAsDataUrl: fallbackBlob });
         if (coerced === null || coerced === undefined) {
-            return options.bodyType === 'raw' ? 'null' : '';
+            if (options.bodyType === 'raw') {
+                const prevChar = value[offset - 1];
+                const nextChar = value[offset + matchText.length];
+                if (prevChar === '"' && nextChar === '"') {
+                    return '';
+                }
+                return 'null';
+            }
+            return '';
         }
         if (typeof coerced === 'object') {
             try {
@@ -27134,7 +27142,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     }`}
                                             >
                                                 <span className={`w-2 h-2 rounded-full ${getStatusColor(resolveModelKey(node.settings?.model))}`}></span>
-                                                <span className="truncate font-mono">{getApiConfigByKey(node.settings?.model)?.id || 'Model'}</span>
+                                                <span className="truncate font-mono">{getModelLabelWithProvider(node.settings?.model)}</span>
                                             </button>
                                             {activeDropdown?.nodeId === node.id && activeDropdown.type === 'model' && (
                                                 <div
