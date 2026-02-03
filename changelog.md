@@ -9,7 +9,8 @@
 - **[修复]** 本地文件访问遇到连接中止不再抛异常日志。
 - **[修复]** workflows 批处理脚本兼容 cmd，避免内联 PowerShell 解析失败。
 - **[优化]** 本地服务器恢复逐条请求日志输出。
-- **[修复]** 模板 JSON 读取支持 UTF-8 BOM（避免 Unexpected UTF-8 BOM 报错）。
+- **[修复]** ComfyUI 响应解析支持 UTF-8 BOM（避免 Unexpected UTF-8 BOM 报错）。
+- **[修复]** outputs/detail 允许用 prompt_id 作为 requestId 查询结果。
 
 #### 2026-02-02 已验证（3.8.3）
 - **[新增]** 模型库：单模型导入/导出 + 复制模型快速复用配置。

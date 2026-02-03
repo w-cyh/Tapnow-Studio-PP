@@ -460,7 +460,11 @@ class ComfyMiddleware:
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(f"{COMFY_URL}/prompt", data=data)
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+            raw = resp.read()
+            try:
+                return json.loads(raw.decode('utf-8-sig'))
+            except Exception:
+                return json.loads(raw)
 
     @staticmethod
     def worker_loop():
@@ -637,6 +641,18 @@ def build_outputs_response(job):
             "outputs": outputs
         }
     }
+
+def resolve_job_by_request_id(request_id):
+    if not request_id:
+        return None
+    with STATUS_LOCK:
+        job = JOB_STATUS.get(request_id)
+        if job:
+            return job
+        for candidate in JOB_STATUS.values():
+            if candidate.get('prompt_id') == request_id:
+                return candidate
+    return None
 
 # ==============================================================================
 # SECTION 4: HTTP 处理器 (Request Handlers)
@@ -833,15 +849,13 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
             
         elif path.startswith('/comfy/status/'):
             job_id = path.split('/')[-1]
-            with STATUS_LOCK:
-                status = JOB_STATUS.get(job_id)
+            status = resolve_job_by_request_id(job_id)
             if status: self._send_json(status)
             else: self._send_json({"error": "Job not found"}, 404)
 
         elif path.startswith('/comfy/outputs/'):
             job_id = path.split('/')[-1]
-            with STATUS_LOCK:
-                job = JOB_STATUS.get(job_id)
+            job = resolve_job_by_request_id(job_id)
             if job:
                 self._send_json(build_outputs_response(job))
             else:
@@ -850,8 +864,7 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
         elif path in ('/comfy/detail', '/w/v1/webapp/task/openapi/detail', '/task/openapi/detail'):
             params = parse_qs(parsed.query or '')
             request_id = params.get('requestId', [None])[0] or params.get('request_id', [None])[0] or params.get('taskId', [None])[0]
-            with STATUS_LOCK:
-                job = JOB_STATUS.get(request_id) if request_id else None
+            job = resolve_job_by_request_id(request_id)
             if job:
                 self._send_json(build_detail_response(job))
             else:
@@ -860,8 +873,7 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
         elif path in ('/comfy/outputs', '/w/v1/webapp/task/openapi/outputs', '/task/openapi/outputs'):
             params = parse_qs(parsed.query or '')
             request_id = params.get('requestId', [None])[0] or params.get('request_id', [None])[0] or params.get('taskId', [None])[0]
-            with STATUS_LOCK:
-                job = JOB_STATUS.get(request_id) if request_id else None
+            job = resolve_job_by_request_id(request_id)
             if job:
                 self._send_json(build_outputs_response(job))
             else:
