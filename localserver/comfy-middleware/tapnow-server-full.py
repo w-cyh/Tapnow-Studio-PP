@@ -419,8 +419,17 @@ class ComfyMiddleware:
         if not isinstance(user_inputs, dict):
             return workflow
 
+        def find_unique_node_with_input(input_name):
+            matches = []
+            for node_id, node in workflow.items():
+                inputs = node.get('inputs') if isinstance(node, dict) else None
+                if isinstance(inputs, dict) and input_name in inputs:
+                    matches.append(node_id)
+            return matches
+
         for key, val in user_inputs.items():
             value = ComfyMiddleware.coerce_value(val)
+            handled = False
             if key in params_map:
                 mapping = params_map[key]
                 node_id = str(mapping.get('node_id', '')).strip()
@@ -429,6 +438,7 @@ class ComfyMiddleware:
                     target = workflow[node_id]
                     if not ComfyMiddleware.set_by_path(target, field_path, value):
                         log(f"[Comfy] 参数填充失败 {key}: 无法写入路径 {field_path}")
+                handled = True
                 continue
 
             # 兼容 BizyAir 风格: "NodeID:NodeType.field"
@@ -440,6 +450,7 @@ class ComfyMiddleware:
                     inputs = workflow[node_id].setdefault('inputs', {})
                     if isinstance(inputs, dict):
                         inputs[field_name] = value
+                handled = True
                 continue
 
             # 兼容简化 "NodeID.field"
@@ -451,6 +462,31 @@ class ComfyMiddleware:
                     inputs = workflow[node_id].setdefault('inputs', {})
                     if isinstance(inputs, dict):
                         inputs[field_name] = value
+                handled = True
+                continue
+
+            # 兜底：允许用通用键名（prompt/seed/steps/width/height）
+            if not handled and isinstance(key, str):
+                alias_map = {
+                    "prompt": ["text", "prompt"],
+                    "text": ["text", "prompt"]
+                }
+                if key in alias_map:
+                    for input_name in alias_map[key]:
+                        matches = find_unique_node_with_input(input_name)
+                        if len(matches) == 1:
+                            inputs = workflow[matches[0]].setdefault('inputs', {})
+                            if isinstance(inputs, dict):
+                                inputs[input_name] = value
+                            handled = True
+                            break
+                if not handled and key in ("seed", "steps", "width", "height"):
+                    matches = find_unique_node_with_input(key)
+                    if len(matches) == 1:
+                        inputs = workflow[matches[0]].setdefault('inputs', {})
+                        if isinstance(inputs, dict):
+                            inputs[key] = value
+                        handled = True
         return workflow
 
     @staticmethod
@@ -614,11 +650,15 @@ def normalize_job_status(status):
 def build_detail_response(job):
     data = {
         "requestId": job.get('id'),
+        "taskId": job.get('id'),
+        "app_id": job.get('app_id'),
         "status": normalize_job_status(job.get('status')),
         "created_at": format_timestamp(job.get('created_at', 0)),
         "updated_at": format_timestamp(job.get('finished_at') or job.get('started_at') or job.get('created_at', 0)),
         "progress": job.get('progress') or {"value": 0, "max": 0}
     }
+    if job.get('prompt_id'):
+        data["prompt_id"] = job.get('prompt_id')
     if job.get('error'):
         data["error"] = job.get('error')
     return {
@@ -1162,7 +1202,9 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
         if 'video_save_path' in data:
             config['video_save_path'] = data['video_save_path'] or ''
         if 'log_enabled' in data:
-            config['log_enabled'] = bool(data['log_enabled'])
+            # 仅在明确提供布尔值时更新，避免 null/空字符串误关闭日志
+            if isinstance(data['log_enabled'], bool):
+                config['log_enabled'] = data['log_enabled']
         if 'convert_png_to_jpg' in data:
             config['convert_png_to_jpg'] = bool(data['convert_png_to_jpg'])
         if 'jpg_quality' in data:
