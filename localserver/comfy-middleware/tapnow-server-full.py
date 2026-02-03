@@ -640,7 +640,11 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
     
     def log_message(self, format, *args):
         # 覆盖默认日志，使用统一的 log 函数
-        pass 
+        if config.get("log_enabled", True) and FEATURES.get("log_console", True):
+            try:
+                log(f"HTTP: {format % args}")
+            except Exception:
+                log("HTTP: request received")
 
     # --- 基础 Helper ---
     
@@ -1289,8 +1293,13 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
             self._send_cors()
             self.end_headers()
             self.wfile.write(content)
-        except:
-            self.send_response(500); self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+        except Exception:
+            try:
+                self.send_response(500); self.end_headers()
+            except Exception:
+                pass
 
     def handle_proxy(self, parsed):
         target_url = parse_proxy_target(parsed, self.headers)

@@ -6,6 +6,9 @@
 - **[新增]** 本地 ComfyUI 中间件 v2.3：兼容 BizyAir/RunningHub 接口，补齐 create/detail/outputs。
 - **[新增]** 本地 ComfyUI 测试指引文档（含 BizyAir/RunningHub/Prompt 三种测试路径）。
 - **[新增]** workflows 批处理：单 JSON 自动重命名 template.json 并生成 meta.json。
+- **[修复]** 本地文件访问遇到连接中止不再抛异常日志。
+- **[修复]** workflows 批处理脚本兼容 cmd，避免内联 PowerShell 解析失败。
+- **[优化]** 本地服务器恢复逐条请求日志输出。
 
 #### 2026-02-02 已验证（3.8.3）
 - **[新增]** 模型库：单模型导入/导出 + 复制模型快速复用配置。
