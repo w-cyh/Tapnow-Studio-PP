@@ -408,7 +408,12 @@ class ComfyMiddleware:
                 field = (item.get('fieldName') or item.get('field') or '').strip()
                 if not node_id or not field:
                     continue
-                value = ComfyMiddleware.coerce_value(item.get('fieldValue'))
+                raw_value = item.get('fieldValue')
+                if raw_value is None:
+                    continue
+                if isinstance(raw_value, str) and raw_value.strip() == '':
+                    continue
+                value = ComfyMiddleware.coerce_value(raw_value)
                 if node_id in workflow:
                     inputs = workflow[node_id].setdefault('inputs', {})
                     if isinstance(inputs, dict):
@@ -428,6 +433,10 @@ class ComfyMiddleware:
             return matches
 
         for key, val in user_inputs.items():
+            if val is None:
+                continue
+            if isinstance(val, str) and val.strip() == '':
+                continue
             value = ComfyMiddleware.coerce_value(val)
             handled = False
             if key in params_map:
@@ -494,13 +503,25 @@ class ComfyMiddleware:
         """提交 Prompt 到 ComfyUI"""
         payload = {"client_id": CLIENT_ID, "prompt": workflow}
         data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(f"{COMFY_URL}/prompt", data=data)
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read()
+        req = urllib.request.Request(
+            f"{COMFY_URL}/prompt",
+            data=data,
+            headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                raw = resp.read()
+                try:
+                    return json.loads(raw.decode('utf-8-sig'))
+                except Exception:
+                    return json.loads(raw)
+        except urllib.error.HTTPError as e:
             try:
-                return json.loads(raw.decode('utf-8-sig'))
+                err_body = e.read().decode('utf-8', errors='replace')
+                log(f"[Comfy] HTTPError {e.code}: {err_body}")
             except Exception:
-                return json.loads(raw)
+                log(f"[Comfy] HTTPError {e.code}")
+            raise
 
     @staticmethod
     def worker_loop():

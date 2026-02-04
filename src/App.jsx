@@ -2334,6 +2334,23 @@ const normalizeAsyncRequestTemplate = (template) => {
     if (!template || typeof template !== 'object') return null;
     return normalizeRequestTemplate({ ...template, enabled: true });
 };
+const coerceAsyncRequestTemplate = (value, defaultMethod = 'GET') => {
+    if (!value) return null;
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        const hasRequestId = /\{\{\s*requestId\s*\}\}/i.test(trimmed)
+            || /requestId=|request_id=|taskId=/.test(trimmed);
+        const endpoint = hasRequestId
+            ? trimmed
+            : `${trimmed}${trimmed.includes('?') ? '&' : '?'}requestId={{requestId}}`;
+        return normalizeRequestTemplate({ endpoint, method: defaultMethod });
+    }
+    if (typeof value === 'object') {
+        return normalizeAsyncRequestTemplate(value);
+    }
+    return null;
+};
 const normalizeAsyncConfig = (config) => {
     if (!config || typeof config !== 'object') return null;
     const normalized = {
@@ -2341,11 +2358,11 @@ const normalizeAsyncConfig = (config) => {
         requestIdPaths: normalizeStringArray(config.requestIdPaths || config.requestIdPath || config.requestId),
         pollIntervalMs: Number.isFinite(Number(config.pollIntervalMs)) ? Number(config.pollIntervalMs) : 3000,
         maxAttempts: Number.isFinite(Number(config.maxAttempts)) ? Number(config.maxAttempts) : 300,
-        statusRequest: normalizeAsyncRequestTemplate(config.statusRequest || config.status || config.pollRequest),
+        statusRequest: coerceAsyncRequestTemplate(config.statusRequest || config.status || config.pollRequest || config.detail),
         statusPath: typeof config.statusPath === 'string' ? config.statusPath.trim() : '',
         successValues: normalizeStringArray(config.successValues || config.successStatuses || config.successStatus || config.success),
         failureValues: normalizeStringArray(config.failureValues || config.failureStatuses || config.failureStatus || config.failure),
-        outputsRequest: normalizeAsyncRequestTemplate(config.outputsRequest || config.outputs || config.resultRequest),
+        outputsRequest: coerceAsyncRequestTemplate(config.outputsRequest || config.outputs || config.resultRequest),
         outputsPath: typeof config.outputsPath === 'string' ? config.outputsPath.trim() : '',
         outputsUrlField: typeof config.outputsUrlField === 'string' ? config.outputsUrlField.trim() : '',
         errorPath: typeof config.errorPath === 'string' ? config.errorPath.trim() : ''

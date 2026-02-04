@@ -2,7 +2,7 @@
 
 本文档记录了 Tapnow Studio 近期的所有关键更新、修复和功能改进。
 
-#### 2026-02-03 开发中改动（3.8.4-rc1）
+#### 2026-02-04 已验证（3.8.4）
 - **[新增]** 本地 ComfyUI 中间件 v2.3：兼容 BizyAir/RunningHub 接口，补齐 create/detail/outputs。
 - **[新增]** 本地 ComfyUI 测试指引文档（含 BizyAir/RunningHub/Prompt 三种测试路径）。
 - **[新增]** workflows 批处理：单 JSON 自动重命名 template.json 并生成 meta.json。
@@ -11,6 +11,9 @@
 - **[优化]** 本地服务器恢复逐条请求日志输出。
 - **[修复]** ComfyUI 响应解析支持 UTF-8 BOM（避免 Unexpected UTF-8 BOM 报错）。
 - **[修复]** outputs/detail 允许用 prompt_id 作为 requestId 查询结果。
+- **[修复]** ComfyUI /prompt 请求补齐 JSON header，并输出 400 错误体便于排查。
+- **[修复]** 本地 ComfyUI 输入为空时不覆盖模板默认值，避免 400 校验失败。
+- **[文档]** 合并模型库说明书与测试方法为统一版本。
 
 #### 2026-02-02 已验证（3.8.3）
 - **[新增]** 模型库：单模型导入/导出 + 复制模型快速复用配置。
