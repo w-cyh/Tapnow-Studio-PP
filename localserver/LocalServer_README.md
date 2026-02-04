@@ -1,6 +1,18 @@
 # Tapnow Studio 本地接收器配置
 
-本地接收器（LocalServer）是 Tapnow Studio 的核心基础设施，负责 **本地缓存/保存**、**跨域代理 (CORS)**、以及 **ComfyUI 中间件接入**。
+## 目录结构（必读）
+```
+localserver/
+  tapnow-server-full.py            # 本地接收器主程序（全功能）
+  tapnow-local-config.json         # 本地接收器配置
+  LocalServer_README.md            # 本说明
+  Middleware_README-ComfyUI.md     # ComfyUI 中间件说明
+  comfy-middleware/                # ComfyUI 代理/中间件代码
+  workflows/                       # ComfyUI 模板目录（template.json / meta.json）
+```
+
+本地接收器（LocalServer）是 Tapnow Studio 的核心基础设施，负责 **本地缓存/保存**、**跨域代理 (CORS)**、以及 **ComfyUI 中间件接入**。  
+并发优化：内部采用线程化 HTTP Server 处理请求，避免流式/上传阻塞其它请求；ComfyUI 任务另有队列管理，避免并发卡死。
 
 ---
 
@@ -15,6 +27,15 @@
 python tapnow-server-full.py
 ```
 默认监听端口：**9527**
+
+### 配置文件作用（tapnow-local-config.json）
+该配置文件决定本地接收器的核心行为：
+* **allowed_roots**：允许读写/保存的根目录白名单。
+* **save_path**：资源保存目录（必须落在 allowed_roots 内）。
+* **proxy_allowed_hosts**：代理白名单（决定哪些域名允许走 `/proxy`）。
+* **proxy_timeout**：代理超时（秒）。
+
+修改配置后需重启本地接收器生效。
 
 ---
 
@@ -100,6 +121,39 @@ const resp = await fetch(url, {
   body: JSON.stringify(payload)
 });
 ```
+
+### 2.5 地址写法（Query / Header）
+**Query 方式（推荐）**
+```javascript
+const target = 'https://api.openai.com/v1/chat/completions';
+const url = `http://127.0.0.1:9527/proxy?url=${encodeURIComponent(target)}`;
+```
+
+**Header 方式（避免过长 URL）**
+```javascript
+const resp = await fetch('http://127.0.0.1:9527/proxy', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'X-Proxy-Target': 'https://api.openai.com/v1/chat/completions'
+  },
+  body: JSON.stringify(payload)
+});
+```
+
+**上传文件（multipart）**
+```javascript
+const form = new FormData();
+form.append('file', file);
+const url = `http://127.0.0.1:9527/proxy?url=${encodeURIComponent(uploadUrl)}`;
+await fetch(url, {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${apiKey}` },
+  body: form
+});
+```
+注意：不要手动设置 `Content-Type`，浏览器会自动添加 boundary。
 
 说明：
 * `proxy_allowed_hosts` 为空则代理被禁用。
