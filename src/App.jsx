@@ -416,12 +416,21 @@ const LazyBase64Image = ({ src, className, alt, onError, onLoad, ...props }) => 
     const blobUrlRef = useRef(null);
 
     useEffect(() => {
+        let active = true;
+        // src 变更时先清空旧图，避免“新图未加载时仍显示上一张”
+        if (blobUrlRef.current && blobUrlRef.current.startsWith('blob:')) {
+            URL.revokeObjectURL(blobUrlRef.current);
+        }
+        blobUrlRef.current = null;
         setError(false);
+        setBlobUrl(null);
         // 如果已经是 Blob URL 或 HTTP URL，直接使用
         if (!src || src.startsWith('blob:') || src.startsWith('http://') || src.startsWith('https://')) {
-            setBlobUrl(src);
-            setLoading(false);
-            return;
+            if (active) {
+                setBlobUrl(src);
+                setLoading(false);
+            }
+            return () => { active = false; };
         }
 
         // V3.5.16: If it's an IndexedDB image reference (img_xxx), resolve it
@@ -431,6 +440,7 @@ const LazyBase64Image = ({ src, className, alt, onError, onLoad, ...props }) => 
             const resolveFromIDB = async () => {
                 try {
                     const url = await LocalImageManager.getImage(src);
+                    if (!active) return;
                     if (url) {
                         blobUrlRef.current = url;
                         setBlobUrl(url);
@@ -445,13 +455,14 @@ const LazyBase64Image = ({ src, className, alt, onError, onLoad, ...props }) => 
                         }
                     }
                 } catch (err) {
+                    if (!active) return;
                     console.error('[LazyBase64Image] IDB resolve failed:', err);
                     setError(true);
                 }
-                setLoading(false);
+                if (active) setLoading(false);
             };
             resolveFromIDB();
-            return;
+            return () => { active = false; };
         }
 
         // 如果是 Base64 Data URL，优先直用（file:// 下避免 blob: 安全限制）
@@ -459,14 +470,17 @@ const LazyBase64Image = ({ src, className, alt, onError, onLoad, ...props }) => 
             const normalized = normalizeDataUrl(src);
             const isFileProtocol = typeof window !== 'undefined' && window.location?.protocol === 'file:';
             if (isFileProtocol) {
-                blobUrlRef.current = normalized;
-                setBlobUrl(normalized);
-                setLoading(false);
-                return;
+                if (active) {
+                    blobUrlRef.current = normalized;
+                    setBlobUrl(normalized);
+                    setLoading(false);
+                }
+                return () => { active = false; };
             }
             const convertToBlobUrl = async () => {
                 try {
                     const blob = dataUrlToBlob(normalized);
+                    if (!active) return;
                     if (!blob) {
                         setError(true);
                         setBlobUrl(null);
@@ -476,6 +490,7 @@ const LazyBase64Image = ({ src, className, alt, onError, onLoad, ...props }) => 
                     blobUrlRef.current = url;
                     setBlobUrl(url);
                 } catch (err) {
+                    if (!active) return;
                     console.warn('Base64转Blob失败', err);
                     setError(true);
                     setBlobUrl(null);
@@ -488,6 +503,7 @@ const LazyBase64Image = ({ src, className, alt, onError, onLoad, ...props }) => 
 
         // 清理函数：组件卸载时释放 Blob URL
         return () => {
+            active = false;
             if (blobUrlRef.current && blobUrlRef.current.startsWith('blob:')) {
                 URL.revokeObjectURL(blobUrlRef.current);
                 blobUrlRef.current = null;
@@ -525,8 +541,8 @@ const ResolvedVideo = ({ src, className, onError, onLoadedMetadata, ...props }) 
     const [resolvedSrc, setResolvedSrc] = useState('');
     useEffect(() => {
         let active = true;
+        setResolvedSrc('');
         if (!src) {
-            setResolvedSrc('');
             return () => { active = false; };
         }
         if (LocalImageManager.isImageId(src)) {
@@ -831,7 +847,7 @@ const HistoryItem = memo(({
     const localCacheFallback = mappedCacheUrl || item.localCacheUrl || (item.localCacheMap ? Object.values(item.localCacheMap)[0] : null);
     const hasLocalCache = !!(localCacheActive && localCacheFallback && (!isLocalCacheUrlAvailable || isLocalCacheUrlAvailable(localCacheFallback)));
     const thumbnailUrl = item.thumbnailUrl || null;
-    const canDrag = item.status === 'completed' && (item.type === 'image' || (multiImages && multiImages.length > 0));
+    const canDrag = isCompletedLikeStatus(item.status) && (item.type === 'image' || (multiImages && multiImages.length > 0));
     const historyMeta = getHistoryMeta ? getHistoryMeta(item) : null;
     const resolvedModelLabel = historyMeta?.modelLabel;
     const rawModelName = (() => {
@@ -873,16 +889,37 @@ const HistoryItem = memo(({
         }
         return resolveItemUrl();
     };
+    const getSelectedDragRawUrl = (specificUrl = null) => {
+        if (specificUrl) return specificUrl;
+        if (multiImages && multiImages.length > 0) {
+            const rawIndex = Number.isInteger(item.selectedMjImageIndex) ? item.selectedMjImageIndex : 0;
+            const clampedIndex = Math.max(0, Math.min(rawIndex, multiImages.length - 1));
+            return multiImages[clampedIndex] || multiImages[0] || '';
+        }
+        return item.url || item.originalUrl || item.mjOriginalUrl || '';
+    };
     const handleDragStart = (e, specificUrl = null) => {
-        const dragUrl = getDragUrl(specificUrl);
+        const selectedRawUrl = getSelectedDragRawUrl(specificUrl);
+        const dragUrl = getDragUrl(selectedRawUrl || specificUrl);
         if (!dragUrl) return;
+        const selectedIndex = (() => {
+            if (!multiImages || multiImages.length === 0) return 0;
+            if (selectedRawUrl) {
+                const idx = multiImages.indexOf(selectedRawUrl);
+                if (idx >= 0) return idx;
+            }
+            const rawIndex = Number.isInteger(item.selectedMjImageIndex) ? item.selectedMjImageIndex : 0;
+            return Math.max(0, Math.min(rawIndex, multiImages.length - 1));
+        })();
         const payload = {
             source: 'history',
             itemId: item.id,
-            url: dragUrl,
+            type: item.type || 'image',
+            url: selectedRawUrl || dragUrl,
             originalUrl: item.originalUrl || item.mjOriginalUrl || item.url || dragUrl,
             mjOriginalUrl: item.mjOriginalUrl || item.originalUrl || item.url || dragUrl,
-            selectedIndex: item.selectedMjImageIndex ?? 0
+            mjImages: multiImages ? multiImages.slice(0, 12) : null,
+            selectedIndex
         };
         e.dataTransfer.effectAllowed = 'copy';
         e.dataTransfer.setData('application/x-tapnow-history', JSON.stringify(payload));
@@ -2142,6 +2179,13 @@ const isImageModelType = (type) => type === 'Image' || type === 'ChatImage';
 const isChatModelType = (type) => type === 'Chat' || type === 'ChatImage';
 const MAX_CUSTOM_PARAMS = 30;
 const MAX_CUSTOM_PARAM_VALUES = 50;
+const COMPLETED_STATUS_SET = new Set(['completed', 'complete', 'success', 'succeeded', 'done', 'finished', 'ok']);
+const isCompletedLikeStatus = (status) => {
+    if (status === null || status === undefined || status === '') return true;
+    const normalized = String(status).trim().toLowerCase();
+    if (!normalized) return true;
+    return COMPLETED_STATUS_SET.has(normalized);
+};
 const normalizeCustomParamNotes = (notes) => {
     if (!notes || typeof notes !== 'object') return {};
     const next = {};
@@ -2174,6 +2218,10 @@ const normalizeCustomParams = (params) => {
         const values = Array.isArray(param.values)
             ? param.values.map(value => String(value).trim()).filter(Boolean)
             : [];
+        const rawDefault = param?.defaultValue ?? param?.default ?? '';
+        const defaultValue = rawDefault === null || rawDefault === undefined
+            ? ''
+            : String(rawDefault).trim();
         const normalizedNotes = normalizeCustomParamNotes(param.valueNotes || param.valueLabels || param.notes);
         const notesEnabled = typeof param.notesEnabled === 'boolean'
             ? param.notesEnabled
@@ -2184,7 +2232,8 @@ const normalizeCustomParams = (params) => {
             values,
             override: !!param.override,
             notesEnabled,
-            valueNotes: normalizedNotes
+            valueNotes: normalizedNotes,
+            defaultValue
         };
     }).filter(Boolean);
 };
@@ -2287,11 +2336,15 @@ function getDefaultRequestTemplateForEntry(entry) {
     return getDefaultRequestTemplateForType(type);
 }
 const getCustomParamSelection = (param, selections) => {
-    if (!param || !selections) return '';
-    const byId = param.id && selections[param.id];
-    if (byId !== undefined && byId !== null && byId !== '') return byId;
-    const byName = param.name && selections[param.name];
-    if (byName !== undefined && byName !== null && byName !== '') return byName;
+    if (!param) return '';
+    if (selections) {
+        const byId = param.id && selections[param.id];
+        if (byId !== undefined && byId !== null && byId !== '') return byId;
+        const byName = param.name && selections[param.name];
+        if (byName !== undefined && byName !== null && byName !== '') return byName;
+    }
+    const fallback = param?.defaultValue ?? '';
+    if (fallback !== undefined && fallback !== null && fallback !== '') return fallback;
     return '';
 };
 const getValueLabelWithNotes = (value, notesEnabled, notes) => {
@@ -2515,6 +2568,8 @@ const normalizeModelLibraryEntry = (entry, index = 0) => {
         videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
         supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
         supportsHD: !!entry.supportsHD,
+        omitRatioOnSubmit: !!entry.omitRatioOnSubmit,
+        omitResolutionOnSubmit: !!entry.omitResolutionOnSubmit,
         customParams: normalizeCustomParams(entry.customParams),
         asyncConfig: normalizeAsyncConfig(entry.asyncConfig),
         previewOverrideEnabled: !!entry.previewOverrideEnabled,
@@ -3447,9 +3502,14 @@ const Modal = ({ isOpen, onClose, title, children, theme = 'dark' }) => {
     );
 };
 
-const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate }) => {
+const getLightboxNavImages = (item) => {
     if (!item) return null;
+    if (Array.isArray(item.mjImages) && item.mjImages.length > 1) return item.mjImages;
+    if (Array.isArray(item.output_images) && item.output_images.length > 1) return item.output_images;
+    return null;
+};
 
+const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate }) => {
     // 使用ref存储最新的item值，避免闭包问题
     const itemRef = useRef(item);
     const overlayRef = useRef(null);
@@ -3457,9 +3517,10 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     const onNavigateRef = useRef(onNavigate);
     const onShotNavigateRef = useRef(onShotNavigate);
     const onHistoryNavigateRef = useRef(onHistoryNavigate);
-    useEffect(() => {
-        itemRef.current = item;
-    }, [item]);
+    itemRef.current = item;
+    onNavigateRef.current = onNavigate;
+    onShotNavigateRef.current = onShotNavigate;
+    onHistoryNavigateRef.current = onHistoryNavigate;
     useEffect(() => {
         if (item) {
             requestAnimationFrame(() => {
@@ -3470,16 +3531,7 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
         } else {
             navGuardRef.current.activeKey = null;
         }
-    }, [!!item]);
-    useEffect(() => {
-        onNavigateRef.current = onNavigate;
-    }, [onNavigate]);
-    useEffect(() => {
-        onShotNavigateRef.current = onShotNavigate;
-    }, [onShotNavigate]);
-    useEffect(() => {
-        onHistoryNavigateRef.current = onHistoryNavigate;
-    }, [onHistoryNavigate]);
+    }, [item]);
     const normalizeNavKey = (key) => {
         if (!key) return '';
         const map = {
@@ -3492,11 +3544,12 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     };
     const logLightbox = (action, detail = {}) => {
         const current = itemRef.current || item;
+        const navImages = getLightboxNavImages(current);
         console.log('[Lightbox]', action, {
             id: current?.id,
             type: current?.type,
             url: current?.url,
-            mjCount: Array.isArray(current?.mjImages) ? current.mjImages.length : 0,
+            mjCount: Array.isArray(navImages) ? navImages.length : 0,
             ...detail
         });
     };
@@ -3505,8 +3558,9 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
         logLightbox('open');
     }, [item]);
 
-    const isVideoItem = item.type === 'video' || (item.url && isVideoUrl(item.url));
+    const isVideoItem = item?.type === 'video' || (item?.url && isVideoUrl(item.url));
     const sourceList = useMemo(() => {
+        if (!item) return [];
         const list = [];
         const pushUnique = (val) => {
             if (val && !list.includes(val)) list.push(val);
@@ -3521,9 +3575,15 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     useEffect(() => {
         setActiveSrcIndex(0);
     }, [item, sourceList.length]);
-    const displayUrl = sourceList[activeSrcIndex] || item.url;
+    const displayUrl = sourceList[activeSrcIndex] || item?.url || '';
+    const [mediaReady, setMediaReady] = useState(false);
+    useEffect(() => {
+        setMediaReady(false);
+    }, [displayUrl, item?.id, item?.selectedMjImageIndex, item?.type]);
+    const navImages = useMemo(() => getLightboxNavImages(item), [item]);
     const handleMediaError = () => {
         logLightbox('media_error', { index: activeSrcIndex, total: sourceList.length });
+        setMediaReady(false);
         setActiveSrcIndex((prev) => (prev < sourceList.length - 1 ? prev + 1 : prev));
     };
     const handleClose = (reason = 'manual') => {
@@ -3551,7 +3611,8 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
             }
             const normalizedKey = normalizeNavKey(e.key);
             const navKeys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
-            if (navKeys.includes(normalizedKey)) {
+            const usesActiveKeyGuard = normalizedKey === 'ArrowLeft' || normalizedKey === 'ArrowRight';
+            if (navKeys.includes(normalizedKey) && usesActiveKeyGuard) {
                 if (guard.activeKey && guard.activeKey === normalizedKey) return;
                 if (guard.activeKey && guard.activeKey !== normalizedKey) return;
                 guard.activeKey = normalizedKey;
@@ -3560,37 +3621,41 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
 
             if (normalizedKey === 'ArrowLeft') {
                 // 只在有多张图片时响应
-                if (!currentItem.mjImages || currentItem.mjImages.length <= 1) return;
+                const currentImages = getLightboxNavImages(currentItem);
+                if (!currentImages || currentImages.length <= 1) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const currentIndex = currentItem.selectedMjImageIndex !== undefined ? currentItem.selectedMjImageIndex : 0;
-                const prevIndex = currentIndex > 0 ? currentIndex - 1 : currentItem.mjImages.length - 1;
+                const prevIndex = currentIndex > 0 ? currentIndex - 1 : currentImages.length - 1;
                 const handleNavigate = onNavigateRef.current;
-                if (prevIndex >= 0 && prevIndex < currentItem.mjImages.length && handleNavigate) {
-                    logLightbox('navigate_left', { from: currentIndex, to: prevIndex, total: currentItem.mjImages.length });
+                if (prevIndex >= 0 && prevIndex < currentImages.length && handleNavigate) {
+                    logLightbox('navigate_left', { from: currentIndex, to: prevIndex, total: currentImages.length });
                     // V3.7.22: 立即更新 ref，避免快速按键时状态过时
                     itemRef.current = {
                         ...currentItem,
+                        mjImages: currentImages,
                         selectedMjImageIndex: prevIndex,
-                        url: currentItem.mjImages[prevIndex]
+                        url: currentImages[prevIndex]
                     };
                     handleNavigate(prevIndex);
                 }
             } else if (normalizedKey === 'ArrowRight') {
                 // 只在有多张图片时响应
-                if (!currentItem.mjImages || currentItem.mjImages.length <= 1) return;
+                const currentImages = getLightboxNavImages(currentItem);
+                if (!currentImages || currentImages.length <= 1) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const currentIndex = currentItem.selectedMjImageIndex !== undefined ? currentItem.selectedMjImageIndex : 0;
-                const nextIndex = currentIndex < currentItem.mjImages.length - 1 ? currentIndex + 1 : 0;
+                const nextIndex = currentIndex < currentImages.length - 1 ? currentIndex + 1 : 0;
                 const handleNavigate = onNavigateRef.current;
-                if (nextIndex >= 0 && nextIndex < currentItem.mjImages.length && handleNavigate) {
-                    logLightbox('navigate_right', { from: currentIndex, to: nextIndex, total: currentItem.mjImages.length });
+                if (nextIndex >= 0 && nextIndex < currentImages.length && handleNavigate) {
+                    logLightbox('navigate_right', { from: currentIndex, to: nextIndex, total: currentImages.length });
                     // V3.7.22: 立即更新 ref，避免快速按键时状态过时
                     itemRef.current = {
                         ...currentItem,
+                        mjImages: currentImages,
                         selectedMjImageIndex: nextIndex,
-                        url: currentItem.mjImages[nextIndex]
+                        url: currentImages[nextIndex]
                     };
                     handleNavigate(nextIndex);
                 }
@@ -3599,12 +3664,12 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                 e.preventDefault();
                 e.stopPropagation();
                 const guard = navGuardRef.current;
-                if (now < guard.cooldownUntil) return;
-                if (now - guard.lastShotAt < 320) return;
-                guard.lastShotAt = now;
-                guard.cooldownUntil = now + 300;
                 const handleShotNavigate = onShotNavigateRef.current;
                 if (currentItem.storyboardContext && handleShotNavigate) {
+                    if (now < guard.cooldownUntil) return;
+                    if (now - guard.lastShotAt < 320) return;
+                    guard.lastShotAt = now;
+                    guard.cooldownUntil = now + 300;
                     const { shotIndex, allShots } = currentItem.storyboardContext;
                     if (shotIndex > 0) {
                         logLightbox('shot_up', { from: shotIndex, to: shotIndex - 1, total: allShots.length });
@@ -3612,11 +3677,11 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                     }
                 } else if (onHistoryNavigateRef.current) {
                     // V3.7.29: 历史项导航（向上 = 更早的项目）
-                    if (!currentItem?.id) return;
                     if (now < guard.cooldownUntil) return;
                     if (now - guard.lastHistoryAt < 320) return;
                     guard.lastHistoryAt = now;
                     guard.cooldownUntil = now + 300;
+                    logLightbox('history_up_key');
                     logLightbox('history_up');
                     onHistoryNavigateRef.current(-1);
                 }
@@ -3625,12 +3690,12 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                 e.preventDefault();
                 e.stopPropagation();
                 const guard = navGuardRef.current;
-                if (now < guard.cooldownUntil) return;
-                if (now - guard.lastShotAt < 320) return;
-                guard.lastShotAt = now;
-                guard.cooldownUntil = now + 300;
                 const handleShotNavigate = onShotNavigateRef.current;
                 if (currentItem.storyboardContext && handleShotNavigate) {
+                    if (now < guard.cooldownUntil) return;
+                    if (now - guard.lastShotAt < 320) return;
+                    guard.lastShotAt = now;
+                    guard.cooldownUntil = now + 300;
                     const { shotIndex, allShots } = currentItem.storyboardContext;
                     if (shotIndex < allShots.length - 1) {
                         logLightbox('shot_down', { from: shotIndex, to: shotIndex + 1, total: allShots.length });
@@ -3638,11 +3703,11 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                     }
                 } else if (onHistoryNavigateRef.current) {
                     // V3.7.29: 历史项导航（向下 = 更新的项目）
-                    if (!currentItem?.id) return;
                     if (now < guard.cooldownUntil) return;
                     if (now - guard.lastHistoryAt < 320) return;
                     guard.lastHistoryAt = now;
                     guard.cooldownUntil = now + 300;
+                    logLightbox('history_down_key');
                     logLightbox('history_down');
                     onHistoryNavigateRef.current(1);
                 }
@@ -3668,6 +3733,8 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
         };
     }, [item]);
 
+    if (!item) return null;
+
     return (
         <div
             ref={overlayRef}
@@ -3684,27 +3751,37 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
             <div className="max-w-[90vw] max-h-[85vh] relative" onClick={(e) => e.stopPropagation()}>
                 {item.type === 'image' ? (
                     <LazyBase64Image
+                        key={displayUrl}
                         src={displayUrl}
                         alt={item.prompt}
                         className="max-w-full max-h-[85vh] rounded-lg shadow-2xl object-contain"
                         onError={handleMediaError}
+                        onLoad={() => setMediaReady(true)}
                     />
                 ) : (
                     <ResolvedVideo
+                        key={displayUrl}
                         src={displayUrl}
                         controls
                         autoPlay
                         className="max-w-full max-h-[85vh] rounded-lg shadow-2xl"
                         poster={item.thumbnailUrl || undefined}
                         onError={handleMediaError}
+                        onLoadedMetadata={() => setMediaReady(true)}
+                        onCanPlay={() => setMediaReady(true)}
                     />
+                )}
+                {!mediaReady && (
+                    <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/35 text-white/80 text-xs pointer-events-none">
+                        {t('加载中...')}
+                    </div>
                 )}
                 <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md px-6 py-3 rounded-full text-white text-sm font-medium border border-white/10 text-center shadow-2xl">
                     <div className="line-clamp-1 max-w-xl">{item.prompt}</div>
                     <div className="text-[10px] text-zinc-400 mt-1">
                         {item.width}x{item.height} • {item.id}
-                        {item.mjImages && item.mjImages.length > 1 && (
-                            <span className="ml-2">({(item.selectedMjImageIndex !== undefined ? item.selectedMjImageIndex : 0) + 1}/{item.mjImages.length})</span>
+                        {navImages && navImages.length > 1 && (
+                            <span className="ml-2">({(item.selectedMjImageIndex !== undefined ? item.selectedMjImageIndex : 0) + 1}/{navImages.length})</span>
                         )}
                         {/* V3.7.21: 镜头位置指示器 */}
                         {item.storyboardContext && (
@@ -3713,14 +3790,14 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                     </div>
                 </div>
                 {/* 左右切换提示 */}
-                {item.mjImages && item.mjImages.length > 1 && (
+                {navImages && navImages.length > 1 && (
                     <>
                         <button
                             className="absolute left-4 top-1/2 -translate-y-1/2 text-white/70 hover:text-white p-3 bg-black/50 rounded-full transition-colors"
                             onClick={(e) => {
                                 e.stopPropagation();
                                 const currentIndex = item.selectedMjImageIndex !== undefined ? item.selectedMjImageIndex : 0;
-                                const prevIndex = currentIndex > 0 ? currentIndex - 1 : item.mjImages.length - 1;
+                                const prevIndex = currentIndex > 0 ? currentIndex - 1 : navImages.length - 1;
                                 if (onNavigate) onNavigate(prevIndex);
                             }}
                             title={t('上一张 (←)')}
@@ -3732,12 +3809,58 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                             onClick={(e) => {
                                 e.stopPropagation();
                                 const currentIndex = item.selectedMjImageIndex !== undefined ? item.selectedMjImageIndex : 0;
-                                const nextIndex = currentIndex < item.mjImages.length - 1 ? currentIndex + 1 : 0;
+                                const nextIndex = currentIndex < navImages.length - 1 ? currentIndex + 1 : 0;
                                 if (onNavigate) onNavigate(nextIndex);
                             }}
                             title={t('下一张 (→)')}
                         >
                             <ChevronRight size={24} />
+                        </button>
+                    </>
+                )}
+                {(item.storyboardContext || onHistoryNavigate) && (
+                    <>
+                        <button
+                            className="absolute right-4 top-[34%] -translate-y-1/2 text-white/70 hover:text-white p-2 bg-black/50 rounded-full transition-colors"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (item.storyboardContext && onShotNavigate) {
+                                    const { shotIndex, allShots } = item.storyboardContext;
+                                    if (shotIndex > 0) {
+                                        logLightbox('shot_up_click', { from: shotIndex, to: shotIndex - 1 });
+                                        onShotNavigate(shotIndex - 1, allShots);
+                                    }
+                                    return;
+                                }
+                                if (onHistoryNavigate) {
+                                    logLightbox('history_up_click');
+                                    onHistoryNavigate(-1);
+                                }
+                            }}
+                            title={item.storyboardContext ? t('上一镜头 (↑)') : t('上一组 (↑)')}
+                        >
+                            <ChevronUp size={18} />
+                        </button>
+                        <button
+                            className="absolute right-4 top-[66%] -translate-y-1/2 text-white/70 hover:text-white p-2 bg-black/50 rounded-full transition-colors"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (item.storyboardContext && onShotNavigate) {
+                                    const { shotIndex, allShots } = item.storyboardContext;
+                                    if (shotIndex < allShots.length - 1) {
+                                        logLightbox('shot_down_click', { from: shotIndex, to: shotIndex + 1 });
+                                        onShotNavigate(shotIndex + 1, allShots);
+                                    }
+                                    return;
+                                }
+                                if (onHistoryNavigate) {
+                                    logLightbox('history_down_click');
+                                    onHistoryNavigate(1);
+                                }
+                            }}
+                            title={item.storyboardContext ? t('下一镜头 (↓)') : t('下一组 (↓)')}
+                        >
+                            <ChevronDown size={18} />
                         </button>
                     </>
                 )}
@@ -4375,6 +4498,8 @@ function TapnowApp() {
                         videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
                         supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                         supportsHD: !!entry.supportsHD,
+                        omitRatioOnSubmit: !!entry.omitRatioOnSubmit,
+                        omitResolutionOnSubmit: !!entry.omitResolutionOnSubmit,
                         customParams: normalizeCustomParams(entry.customParams),
                         asyncConfig: entry.asyncConfig && typeof entry.asyncConfig === 'object' ? entry.asyncConfig : null,
                         previewOverrideEnabled: !!entry.previewOverrideEnabled,
@@ -5230,7 +5355,7 @@ function TapnowApp() {
     const [lightboxItem, setLightboxItem] = useState(null);
     // V3.7.22: Ref 用于解决 onNavigate 闭包过时问题
     const lightboxItemRef = useRef(lightboxItem);
-    useEffect(() => { lightboxItemRef.current = lightboxItem; }, [lightboxItem]);
+    lightboxItemRef.current = lightboxItem;
     const lightboxHistorySnapshotRef = useRef(null); // 保存打开时的历史顺序，避免滚动/新增导致跳序
     const lightboxHistoryIndexRef = useRef(-1);
     const [promptLibrary, setPromptLibrary] = useState(() => {
@@ -5432,17 +5557,23 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 本地缓存服务器连接检查
     useEffect(() => {
+        if (!localCacheEnabled) {
+            setLocalCacheServerConnected(false);
+            return;
+        }
         const baseUrl = (localServerUrl || '').replace(/\/+$/, '');
         if (!baseUrl) {
             setLocalCacheServerConnected(false);
             return;
         }
 
+        let cancelled = false;
         const checkLocalCacheServer = async () => {
             try {
                 const res = await fetch(`${baseUrl}/ping`, { method: 'GET' });
                 if (res.ok) {
                     const data = await res.json();
+                    if (cancelled) return;
                     const rawImagePath = data.image_save_path_raw ?? data.image_save_path ?? '';
                     const rawVideoPath = data.video_save_path_raw ?? data.video_save_path ?? '';
                     setLocalCacheServerConnected(true);
@@ -5458,13 +5589,17 @@ function TapnowApp() {
                     return;
                 }
             } catch (e) { }
+            if (cancelled) return;
             setLocalCacheServerConnected(false);
         };
 
         checkLocalCacheServer();
         const interval = setInterval(checkLocalCacheServer, 30000);
-        return () => clearInterval(interval);
-    }, [localServerUrl]);
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [localServerUrl, localCacheEnabled]);
 
     useEffect(() => {
         if (localCacheBannerTimerRef.current) {
@@ -5660,6 +5795,8 @@ function TapnowApp() {
         const proxyBaseUrl = (options.proxyBaseUrl || localServerUrl || '').trim().replace(/\/+$/, '');
         let rawUrl = String(url);
         rawUrl = await resolveSpecialUrl(rawUrl);
+        rawUrl = applyMediaCachePolicy(rawUrl);
+        if (!rawUrl) throw new Error('Invalid URL');
         const fetchBlob = async (target) => {
             const res = await fetch(target);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -5784,15 +5921,161 @@ function TapnowApp() {
         });
     };
 
+    const normalizePersistLookupKey = useCallback((value) => {
+        if (!value || typeof value !== 'string') return '';
+        const raw = String(value).trim();
+        if (!raw) return '';
+        const noHash = raw.split('#')[0];
+        const noQuery = noHash.split('?')[0];
+        try {
+            const parsed = new URL(noQuery);
+            const host = String(parsed.hostname || '').toLowerCase();
+            let pathname = parsed.pathname || '';
+            try { pathname = decodeURIComponent(pathname); } catch (e) { }
+            if ((host === '127.0.0.1' || host === 'localhost') && pathname.startsWith('/file/')) {
+                return pathname.toLowerCase();
+            }
+            return `${parsed.origin}${pathname}`.toLowerCase();
+        } catch (e) {
+            return noQuery.toLowerCase();
+        }
+    }, []);
+
+    const sourceReferenceLookupRef = useRef(new Map());
+    const sourceReferenceResolveCacheRef = useRef(new Map());
+    const refreshSourceReferenceLookup = useCallback(() => {
+        const map = new Map();
+        const pickSourceFallback = (historyItem) => {
+            if (!historyItem || typeof historyItem !== 'object') return '';
+            const candidates = [
+                ...(Array.isArray(historyItem.output_images) ? historyItem.output_images : []),
+                ...(Array.isArray(historyItem.mjImages) ? historyItem.mjImages : []),
+                historyItem.originalUrl,
+                historyItem.mjOriginalUrl,
+                historyItem.url
+            ];
+            for (const candidate of candidates) {
+                if (!candidate || typeof candidate !== 'string') continue;
+                const normalized = candidate.trim();
+                if (!normalized || normalized.startsWith('blob:') || isLocalCacheUrl(normalized)) continue;
+                return normalized;
+            }
+            return '';
+        };
+        const addPair = (cacheUrl, sourceUrl) => {
+            if (!cacheUrl || !sourceUrl) return;
+            const normalizedSource = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
+            if (!normalizedSource || normalizedSource.startsWith('blob:') || isLocalCacheUrl(normalizedSource)) return;
+            const rawCache = String(cacheUrl);
+            map.set(rawCache, normalizedSource);
+            const strippedCache = rawCache.split('#')[0].split('?')[0];
+            if (strippedCache && strippedCache !== rawCache) {
+                map.set(strippedCache, normalizedSource);
+            }
+            const key = normalizePersistLookupKey(rawCache);
+            if (key) map.set(key, normalizedSource);
+        };
+        for (const [sourceUrl, cacheUrl] of cachedHistoryUrlRef.current.entries()) {
+            addPair(cacheUrl, sourceUrl);
+        }
+        history.forEach((historyItem) => {
+            if (!historyItem || typeof historyItem !== 'object') return;
+            if (historyItem.localCacheMap && typeof historyItem.localCacheMap === 'object') {
+                Object.entries(historyItem.localCacheMap).forEach(([sourceUrl, cacheUrl]) => {
+                    addPair(cacheUrl, sourceUrl);
+                });
+            }
+            if (historyItem.localCacheUrl) {
+                const fallback = pickSourceFallback(historyItem);
+                if (fallback) addPair(historyItem.localCacheUrl, fallback);
+            }
+        });
+        sourceReferenceLookupRef.current = map;
+        sourceReferenceResolveCacheRef.current.clear();
+    }, [history, isLocalCacheUrl, normalizePersistLookupKey]);
+    useEffect(() => {
+        refreshSourceReferenceLookup();
+    }, [refreshSourceReferenceLookup]);
+
+    const resolveSourceReferenceUrl = useCallback((value) => {
+        if (!value || typeof value !== 'string') return value;
+        if (sourceReferenceResolveCacheRef.current.has(value)) {
+            return sourceReferenceResolveCacheRef.current.get(value);
+        }
+        let next = value.trim();
+        if (!next) {
+            sourceReferenceResolveCacheRef.current.set(value, '');
+            return '';
+        }
+        if (LocalImageManager.isImageId(next) || next.startsWith('data:') || next.startsWith('asset://') || next.startsWith('blob:')) {
+            sourceReferenceResolveCacheRef.current.set(value, next);
+            return next;
+        }
+        const looksLikeLocalRuntimeUrl = next.includes('127.0.0.1')
+            || next.includes('localhost')
+            || next.includes('/proxy?url=')
+            || next.includes('/file/.tapnow_cache/')
+            || next.includes('.tapnow_cache\\');
+        if (!looksLikeLocalRuntimeUrl) {
+            sourceReferenceResolveCacheRef.current.set(value, next);
+            return next;
+        }
+
+        const unwrapProxy = (raw) => {
+            try {
+                const parsed = new URL(String(raw));
+                const isLocalHost = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
+                if (isLocalHost && parsed.pathname === '/proxy') {
+                    const target = parsed.searchParams.get('url');
+                    if (target) return target;
+                }
+            } catch (e) { }
+            return raw;
+        };
+        next = unwrapProxy(next);
+
+        if (!isLocalCacheUrl(next)) {
+            sourceReferenceResolveCacheRef.current.set(value, next);
+            return next;
+        }
+
+        const direct = sourceReferenceLookupRef.current.get(next);
+        if (direct) {
+            sourceReferenceResolveCacheRef.current.set(value, direct);
+            return direct;
+        }
+        const stripped = next.split('#')[0].split('?')[0];
+        if (stripped) {
+            const fromStripped = sourceReferenceLookupRef.current.get(stripped);
+            if (fromStripped) {
+                sourceReferenceResolveCacheRef.current.set(value, fromStripped);
+                return fromStripped;
+            }
+        }
+        const targetKey = normalizePersistLookupKey(next);
+        if (targetKey) {
+            const fromKey = sourceReferenceLookupRef.current.get(targetKey);
+            if (fromKey) {
+                sourceReferenceResolveCacheRef.current.set(value, fromKey);
+                return fromKey;
+            }
+        }
+        sourceReferenceResolveCacheRef.current.set(value, next);
+        return next;
+    }, [isLocalCacheUrl, normalizePersistLookupKey]);
+
     const resolveAutoSaveUrl = useCallback(async (value) => {
         if (!value || typeof value !== 'string') return value;
-        if (value.startsWith('asset://')) {
-            const resolved = resolveAssetBundleUrl(value);
-            if (resolved && resolved !== value) return resolved;
-            const fallback = getAssetFallbackUrl(value);
-            return fallback || value;
+        if (value.startsWith('asset://')) return value;
+        if (!value.startsWith('blob:')) {
+            const maybeLocalRuntime = value.includes('127.0.0.1')
+                || value.includes('localhost')
+                || value.includes('/proxy?url=')
+                || value.includes('/file/.tapnow_cache/')
+                || value.includes('.tapnow_cache\\');
+            if (!maybeLocalRuntime) return value;
+            return resolveSourceReferenceUrl(value);
         }
-        if (!value.startsWith('blob:')) return value;
         if (autoSaveUrlCacheRef.current.has(value)) return autoSaveUrlCacheRef.current.get(value);
         const fallback = getAssetFallbackUrl(value);
         if (fallback) {
@@ -5821,9 +6104,10 @@ function TapnowApp() {
                 }
             }
         } catch (e) { }
-        autoSaveUrlCacheRef.current.set(value, value);
-        return value;
-    }, [getBlobFromUrl, getAssetFallbackUrl, resolveAssetBundleUrl]);
+        const sourceFallback = resolveSourceReferenceUrl(value);
+        autoSaveUrlCacheRef.current.set(value, sourceFallback);
+        return sourceFallback;
+    }, [getBlobFromUrl, getAssetFallbackUrl, resolveSourceReferenceUrl]);
 
     const sanitizeObjectForAutoSave = useCallback(async (obj) => {
         if (obj === null || obj === undefined) return obj;
@@ -6227,6 +6511,165 @@ function TapnowApp() {
         return map;
     }, [history]);
 
+    const normalizeLocalCacheLookupKey = useCallback((value) => {
+        if (!value || typeof value !== 'string') return '';
+        const trimmed = value.trim();
+        if (!trimmed) return '';
+        const noHash = trimmed.split('#')[0];
+        const noQuery = noHash.split('?')[0];
+        try {
+            const parsed = new URL(noQuery);
+            const host = String(parsed.hostname || '').toLowerCase();
+            let pathname = parsed.pathname || '';
+            try {
+                pathname = decodeURIComponent(pathname);
+            } catch (e) { }
+            if ((host === '127.0.0.1' || host === 'localhost') && pathname.startsWith('/file/')) {
+                return pathname.toLowerCase();
+            }
+            return `${parsed.origin}${pathname}`.toLowerCase();
+        } catch (e) {
+            return noQuery.toLowerCase();
+        }
+    }, []);
+
+    const localCacheSourceMap = useMemo(() => {
+        const map = new Map();
+        const addPair = (cacheUrl, sourceUrl) => {
+            if (!cacheUrl || !sourceUrl) return;
+            const normalizedSource = sanitizeHistoryUrlValue(sourceUrl, '', { allowLocalCache: false }) || sourceUrl;
+            if (!normalizedSource || isLocalCacheUrl(normalizedSource)) return;
+            const rawCache = String(cacheUrl);
+            map.set(rawCache, normalizedSource);
+            const strippedCache = rawCache.split('#')[0].split('?')[0];
+            if (strippedCache && strippedCache !== rawCache) {
+                map.set(strippedCache, normalizedSource);
+            }
+            const key = normalizeLocalCacheLookupKey(rawCache);
+            if (key) {
+                map.set(key, normalizedSource);
+            }
+        };
+        history.forEach((item) => {
+            if (!item) return;
+            if (item.localCacheMap && typeof item.localCacheMap === 'object') {
+                Object.entries(item.localCacheMap).forEach(([sourceUrl, cacheUrl]) => {
+                    addPair(cacheUrl, sourceUrl);
+                });
+            }
+            if (item.localCacheUrl) {
+                const fallback = getHistoryFallbackUrl(item, { allowLocalCache: false });
+                if (fallback) addPair(item.localCacheUrl, fallback);
+            }
+        });
+        return map;
+    }, [history, getHistoryFallbackUrl, sanitizeHistoryUrlValue, isLocalCacheUrl, normalizeLocalCacheLookupKey]);
+
+    const resolveLocalCacheSourceUrl = useCallback((value) => {
+        if (!value || typeof value !== 'string') return '';
+        if (!isLocalCacheUrl(value)) return value;
+        const direct = localCacheSourceMap.get(value);
+        if (direct && !isLocalCacheUrl(direct)) return direct;
+        const stripped = value.split('#')[0].split('?')[0];
+        if (stripped) {
+            const byStripped = localCacheSourceMap.get(stripped);
+            if (byStripped && !isLocalCacheUrl(byStripped)) return byStripped;
+        }
+        const key = normalizeLocalCacheLookupKey(value);
+        if (key) {
+            const byKey = localCacheSourceMap.get(key);
+            if (byKey && !isLocalCacheUrl(byKey)) return byKey;
+        }
+        return '';
+    }, [localCacheSourceMap, normalizeLocalCacheLookupKey, isLocalCacheUrl]);
+
+    const isHistoryCacheMappingValid = useCallback((item, sourceUrl, cacheUrl) => {
+        if (!cacheUrl) return false;
+        if (!isLocalCacheUrl(cacheUrl)) return true;
+        if (!sourceUrl || isLocalCacheUrl(sourceUrl)) return true;
+        const safeItemId = sanitizeCacheId(item?.id || '');
+        if (!safeItemId) return true;
+        const multiImages = Array.isArray(item?.mjImages) && item.mjImages.length > 1
+            ? item.mjImages
+            : (Array.isArray(item?.output_images) && item.output_images.length > 1 ? item.output_images : null);
+        const sourceIndex = multiImages ? multiImages.indexOf(sourceUrl) : -1;
+        const fallbackSeed = sourceIndex >= 0 ? `${safeItemId}-${sourceIndex}` : safeItemId;
+        const expectedCacheIdRaw = getCacheIdFromUrl(sourceUrl, fallbackSeed);
+        const expectedCacheId = sanitizeCacheId(expectedCacheIdRaw) || expectedCacheIdRaw;
+        if (!expectedCacheId) return true;
+        return String(cacheUrl).includes(expectedCacheId);
+    }, [isLocalCacheUrl, sanitizeCacheId, getCacheIdFromUrl]);
+
+    const resolveLocalCacheTargetUrl = useCallback((sourceUrl, options = {}) => {
+        if (!sourceUrl || typeof sourceUrl !== 'string') return '';
+        if (!localCacheActive) return '';
+        if (isLocalCacheUrl(sourceUrl)) {
+            return isLocalCacheUrlAvailable(sourceUrl) ? sourceUrl : '';
+        }
+        const historyItem = options.historyItem || null;
+        if (historyItem?.localCacheMap?.[sourceUrl]) {
+            const fromItem = historyItem.localCacheMap[sourceUrl];
+            if (fromItem
+                && isHistoryCacheMappingValid(historyItem, sourceUrl, fromItem)
+                && isLocalCacheUrlAvailable(fromItem)) {
+                return fromItem;
+            }
+        }
+        if (historyLocalCacheMap && historyLocalCacheMap.has(sourceUrl)) {
+            const fromGlobal = historyLocalCacheMap.get(sourceUrl);
+            const valid = historyItem
+                ? isHistoryCacheMappingValid(historyItem, sourceUrl, fromGlobal)
+                : true;
+            if (fromGlobal && valid && isLocalCacheUrlAvailable(fromGlobal)) {
+                return fromGlobal;
+            }
+        }
+        return '';
+    }, [localCacheActive, isLocalCacheUrl, isLocalCacheUrlAvailable, historyLocalCacheMap, isHistoryCacheMappingValid]);
+
+    const applyMediaCachePolicy = useCallback((value, options = {}) => {
+        if (!value || typeof value !== 'string') return value;
+        if (LocalImageManager.isImageId(value)) return value;
+        if (value.startsWith('asset://')) return value;
+        if (value.startsWith('blob:')) return value;
+
+        const historyItem = options.historyItem || null;
+        const normalized = sanitizeHistoryUrlValue(value, '', { allowLocalCache: true }) || '';
+        if (!normalized) return '';
+
+        if (!localCacheActive) {
+            if (isLocalCacheUrl(normalized)) {
+                const fallback = resolveLocalCacheSourceUrl(normalized);
+                if (!fallback) return '';
+                const source = sanitizeHistoryUrlValue(fallback, '', { allowLocalCache: false }) || '';
+                return normalizeHistoryUrl(source || '');
+            }
+            return normalizeHistoryUrl(sanitizeHistoryUrlValue(normalized, '', { allowLocalCache: false }) || '');
+        }
+
+        let next = normalized;
+        if (isLocalCacheUrl(next)) {
+            if (isLocalCacheUrlAvailable(next)) {
+                return normalizeHistoryUrl(next);
+            }
+            const fallback = resolveLocalCacheSourceUrl(next);
+            next = fallback || next;
+        }
+
+        const localTarget = resolveLocalCacheTargetUrl(next, { historyItem });
+        if (localTarget) return normalizeHistoryUrl(localTarget);
+        if (isComfyLocalUrl(next)) {
+            const base = (localServerUrl || '').trim().replace(/\/+$/, '');
+            if (base) return `${base}/proxy?url=${encodeURIComponent(next)}`;
+        }
+        return normalizeHistoryUrl(sanitizeHistoryUrlValue(next, '', { allowLocalCache: true }) || '');
+    }, [localCacheActive, isLocalCacheUrl, isLocalCacheUrlAvailable, resolveLocalCacheSourceUrl, sanitizeHistoryUrlValue, resolveLocalCacheTargetUrl, isComfyLocalUrl, localServerUrl]);
+
+    // 统一资产解析渠道 X：所有图片/视频消费方统一调用此函数获取最终 URL
+    const resolveAssetChannelUrl = useCallback((value, options = {}) => {
+        return applyMediaCachePolicy(value, options);
+    }, [applyMediaCachePolicy]);
+
     const historyUrlProxyMap = useMemo(() => {
         const map = new Map();
         history.forEach((item) => {
@@ -6281,6 +6724,7 @@ function TapnowApp() {
 
     const handleHistoryCacheMissing = useCallback((itemId, failedUrl) => {
         if (!itemId) return;
+        sourceReferenceResolveCacheRef.current.clear();
         if (failedUrl) {
             for (const [sourceUrl, cacheUrl] of cachedHistoryUrlRef.current.entries()) {
                 if (cacheUrl === failedUrl) {
@@ -6336,11 +6780,11 @@ function TapnowApp() {
         if (specificUrl) {
             if (localCacheActive && historyLocalCacheMap && historyLocalCacheMap.has(specificUrl)) {
                 const cached = historyLocalCacheMap.get(specificUrl);
-                if (cached && isLocalCacheUrlAvailable(cached)) return cached;
+                if (cached && isHistoryCacheMappingValid(item, specificUrl, cached) && isLocalCacheUrlAvailable(cached)) return cached;
             }
             if (localCacheActive && item.localCacheMap && item.localCacheMap[specificUrl]) {
                 const cached = item.localCacheMap[specificUrl];
-                if (cached && isLocalCacheUrlAvailable(cached)) return cached;
+                if (cached && isHistoryCacheMappingValid(item, specificUrl, cached) && isLocalCacheUrlAvailable(cached)) return cached;
             }
             const normalized = sanitizeHistoryUrlValue(specificUrl, '', { allowLocalCache: localCacheActive });
             if (!normalized || normalized.startsWith('blob:')) {
@@ -6385,18 +6829,18 @@ function TapnowApp() {
             { allowLocalCache: localCacheActive }
         );
         return normalizeHistoryUrl(fallback || '');
-    }, [localCacheActive, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl, isComfyLocalUrl, localServerUrl]);
+    }, [localCacheActive, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl, isComfyLocalUrl, localServerUrl, isHistoryCacheMappingValid]);
 
     const resolveHistoryPreviewUrl = useCallback((item, specificUrl = null) => {
         if (!item) return '';
         if (specificUrl) {
             if (localCacheActive && historyLocalCacheMap && historyLocalCacheMap.has(specificUrl)) {
                 const cached = historyLocalCacheMap.get(specificUrl);
-                if (cached && isLocalCacheUrlAvailable(cached)) return cached;
+                if (cached && isHistoryCacheMappingValid(item, specificUrl, cached) && isLocalCacheUrlAvailable(cached)) return cached;
             }
             if (localCacheActive && item.localCacheMap && item.localCacheMap[specificUrl]) {
                 const cached = item.localCacheMap[specificUrl];
-                if (cached && isLocalCacheUrlAvailable(cached)) return cached;
+                if (cached && isHistoryCacheMappingValid(item, specificUrl, cached) && isLocalCacheUrlAvailable(cached)) return cached;
             }
             if (performanceMode !== 'off' && item.mjImages && item.mjThumbnails) {
                 const idx = item.mjImages.indexOf(specificUrl);
@@ -6442,7 +6886,7 @@ function TapnowApp() {
         const fallback = sanitizeHistoryUrlValue(item.thumbnailUrl, '', { allowLocalCache: localCacheActive })
             || getHistoryFallbackUrl(item, { allowLocalCache: localCacheActive });
         return normalizeHistoryUrl(sanitizeHistoryUrlValue(fallback || '', '', { allowLocalCache: localCacheActive }) || '');
-    }, [localCacheActive, performanceMode, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl, isComfyLocalUrl, localServerUrl]);
+    }, [localCacheActive, performanceMode, historyLocalCacheMap, isLocalCacheUrlAvailable, localCacheIndexTick, sanitizeHistoryUrlValue, getHistoryFallbackUrl, isLocalCacheUrl, isComfyLocalUrl, localServerUrl, isHistoryCacheMappingValid]);
 
     const getHistoryMultiImages = useCallback((item) => {
         if (!item) return null;
@@ -6450,17 +6894,47 @@ function TapnowApp() {
         if (Array.isArray(item.output_images) && item.output_images.length > 1) return item.output_images;
         return null;
     }, []);
-    const getHistoryNavPreview = useCallback((item) => {
+    const normalizeHistoryNavComparableUrl = useCallback((value) => {
+        if (!value || typeof value !== 'string') return '';
+        const unwrapProxyUrl = (raw) => {
+            try {
+                const parsed = new URL(String(raw));
+                const isLocalHost = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
+                if (isLocalHost && parsed.pathname === '/proxy') {
+                    const target = parsed.searchParams.get('url');
+                    if (target) return target;
+                }
+            } catch (e) { }
+            return raw;
+        };
+        const normalized = sanitizeHistoryUrlValue(unwrapProxyUrl(value), '', { allowLocalCache: true }) || '';
+        if (!normalized) return '';
+        const mapped = isLocalCacheUrl(normalized) ? (resolveLocalCacheSourceUrl(normalized) || normalized) : normalized;
+        try {
+            const parsed = new URL(mapped);
+            const cleanPath = parsed.pathname || '';
+            const cleanSearch = parsed.search || '';
+            return `${parsed.origin}${cleanPath}${cleanSearch}`;
+        } catch (e) {
+            return mapped;
+        }
+    }, [sanitizeHistoryUrlValue, isLocalCacheUrl, resolveLocalCacheSourceUrl]);
+
+    const getHistoryNavPreview = useCallback((item, options = {}) => {
         if (!item) return { url: '', index: 0 };
         const multiImages = getHistoryMultiImages(item);
         const maxIndex = multiImages ? multiImages.length - 1 : 0;
-        const rawIndex = Number.isInteger(item.selectedMjImageIndex) ? item.selectedMjImageIndex : 0;
+        const forceFirstImage = !!options.forceFirstImage;
+        const rawIndex = forceFirstImage
+            ? 0
+            : (Number.isInteger(item.selectedMjImageIndex) ? item.selectedMjImageIndex : 0);
         const index = Math.max(0, Math.min(rawIndex, maxIndex));
         const selectedUrl = multiImages ? multiImages[index] : null;
         const resolvedUrl = selectedUrl
             ? resolveHistoryUrl(item, selectedUrl)
             : resolveHistoryUrl(item);
-        return { url: resolvedUrl || '', index };
+        const fallbackUrl = selectedUrl || item.url || item.originalUrl || item.mjOriginalUrl || '';
+        return { url: resolvedUrl || fallbackUrl || '', index };
     }, [getHistoryMultiImages, resolveHistoryUrl]);
 
     const rebuildHistoryThumbnail = useCallback(async (item, options = {}) => {
@@ -6677,7 +7151,7 @@ function TapnowApp() {
 
                 for (const item of history) {
                 const status = item?.status;
-                const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
+                const isCacheableStatus = isCompletedLikeStatus(status);
                 if (!isCacheableStatus) { summary.skippedStatus++; continue; }
                 const candidateUrl = item?.url || item?.originalUrl || item?.mjOriginalUrl || '';
                 const isVideoItem = item?.type === 'video' || isVideoUrl(candidateUrl);
@@ -6714,6 +7188,20 @@ function TapnowApp() {
                 const imageUrls = [...new Set(rawImageUrls.filter(Boolean))];
 
                 if (imageUrls.length === 0) { summary.skippedEmpty++; continue; }
+                const isMultiImage = imageUrls.length > 1;
+                if (isMultiImage) {
+                    const mappedCacheValues = imageUrls.map((url) => cacheMap[url]).filter(Boolean);
+                    const uniqueMappedCacheValues = new Set(mappedCacheValues);
+                    // 修复：多图缓存若全部映射到同一文件，会导致预览/拖拽错图（如 4 号位始终打开 0 号位）
+                    if (mappedCacheValues.length >= imageUrls.length && uniqueMappedCacheValues.size <= 1) {
+                        cacheMap = {};
+                        cacheMapUpdated = true;
+                        localCacheUrl = null;
+                        localFilePath = null;
+                        triedCacheIdsRef.current.delete(item.id);
+                    }
+                }
+
                 const cachedCount = imageUrls.reduce((count, url) => (cacheMap[url] ? count + 1 : count), 0);
 
                 if (triedCacheIdsRef.current.has(item.id) && cachedCount >= imageUrls.length) continue;
@@ -6721,21 +7209,27 @@ function TapnowApp() {
                 summary.processed++;
 
                 if (!cacheRedownloadOnEnable && localCacheUrl) {
-                    let updated = false;
-                    imageUrls.forEach((url) => {
-                        if (!url) return;
-                        if (!cacheMap[url]) {
-                            cacheMap[url] = localCacheUrl;
-                            updated = true;
+                    if (imageUrls.length <= 1) {
+                        let updated = false;
+                        imageUrls.forEach((url) => {
+                            if (!url) return;
+                            if (!cacheMap[url]) {
+                                cacheMap[url] = localCacheUrl;
+                                updated = true;
+                            }
+                        });
+                        if (updated || localCacheUrl !== item.localCacheUrl) {
+                            const nextCacheMap = Object.keys(cacheMap).length > 0 ? cacheMap : null;
+                            setHistory(prev => prev.map(h =>
+                                h.id === item.id ? { ...h, localCacheUrl: localCacheUrl || null, localFilePath: localFilePath || null, localCacheMap: nextCacheMap } : h
+                            ));
                         }
-                    });
-                    if (updated || localCacheUrl !== item.localCacheUrl) {
-                        const nextCacheMap = Object.keys(cacheMap).length > 0 ? cacheMap : null;
-                        setHistory(prev => prev.map(h =>
-                            h.id === item.id ? { ...h, localCacheUrl: localCacheUrl || null, localFilePath: localFilePath || null, localCacheMap: nextCacheMap } : h
-                        ));
+                        continue;
                     }
-                    continue;
+                    const mappedCount = imageUrls.reduce((count, url) => (cacheMap[url] ? count + 1 : count), 0);
+                    if (mappedCount >= imageUrls.length) {
+                        continue;
+                    }
                 }
 
                 for (let idx = 0; idx < imageUrls.length; idx++) {
@@ -6754,7 +7248,7 @@ function TapnowApp() {
                     if (!cacheRedownloadOnEnable) {
                         // 如果全局缓存映射已存在，直接绑定并跳过远程拉取
                         const globalCached = historyLocalCacheMap && historyLocalCacheMap.get(imageUrl);
-                        if (globalCached) {
+                        if (globalCached && isHistoryCacheMappingValid(item, imageUrl, globalCached)) {
                             if (!cacheMap[imageUrl]) {
                                 cacheMap[imageUrl] = globalCached;
                                 cacheMapUpdated = true;
@@ -6845,7 +7339,7 @@ function TapnowApp() {
         cacheHistoryImages();
         const timer = setTimeout(cacheHistoryImages, 3000);
         return () => clearTimeout(timer);
-    }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, localServerUrl, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick, historyLocalCacheMap, cacheRedownloadOnEnable, refreshLocalCacheFileIndex, getLocalCacheCandidateUrl, isLocalCacheUrlAvailable]);
+    }, [history, localCacheActive, localServerConfig.imageSavePath, localServerConfig.videoSavePath, localServerUrl, saveImageToLocalCache, sanitizeCacheId, getCacheIdFromUrl, getItemProxyPreference, getProxyPreferenceForUrl, cacheRefreshTick, historyLocalCacheMap, cacheRedownloadOnEnable, refreshLocalCacheFileIndex, getLocalCacheCandidateUrl, isLocalCacheUrlAvailable, isHistoryCacheMappingValid]);
 
     // V2.6.1 Feature: 历史记录本地缓存（视频）
     useEffect(() => {
@@ -6875,7 +7369,7 @@ function TapnowApp() {
                 }
                 for (const item of history) {
                 const status = item?.status;
-                const isCacheableStatus = !status || ['completed', 'complete', 'success', 'done'].includes(status);
+                const isCacheableStatus = isCompletedLikeStatus(status);
                 if (!isCacheableStatus) { summary.skippedStatus++; continue; }
                 const videoUrl = item?.url || item?.originalUrl || '';
                 const isVideoItem = item?.type === 'video' || isVideoUrl(videoUrl);
@@ -7056,7 +7550,7 @@ function TapnowApp() {
     const isHistoryItemNavigable = useCallback((item) => {
         if (!item) return false;
         const status = item?.status;
-        if (status && !['completed', 'complete', 'success', 'done'].includes(status)) return false;
+        if (!isCompletedLikeStatus(status)) return false;
         const preview = getHistoryNavPreview(item);
         return !!preview?.url;
     }, [getHistoryNavPreview]);
@@ -7070,6 +7564,36 @@ function TapnowApp() {
         if (currentId) {
             const idxById = items.findIndex(item => item?.id === currentId);
             if (idxById >= 0) return idxById;
+        }
+        const currentUrlCandidates = new Set();
+        const addCurrentUrlCandidate = (url) => {
+            const normalized = normalizeHistoryNavComparableUrl(url);
+            if (normalized) currentUrlCandidates.add(normalized);
+        };
+        addCurrentUrlCandidate(currentItem?.url);
+        addCurrentUrlCandidate(currentItem?.originalUrl);
+        addCurrentUrlCandidate(currentItem?.mjOriginalUrl);
+        if (Array.isArray(currentItem?.mjImages)) {
+            currentItem.mjImages.forEach((url) => addCurrentUrlCandidate(url));
+        }
+        if (Array.isArray(currentItem?.output_images)) {
+            currentItem.output_images.forEach((url) => addCurrentUrlCandidate(url));
+        }
+        if (currentUrlCandidates.size > 0) {
+            for (let idx = 0; idx < items.length; idx++) {
+                const item = items[idx];
+                if (!item) continue;
+                const preview = getHistoryNavPreview(item);
+                const previewUrl = normalizeHistoryNavComparableUrl(preview?.url);
+                if (previewUrl && currentUrlCandidates.has(previewUrl)) return idx;
+                const fallbackUrl = normalizeHistoryNavComparableUrl(resolveHistoryUrl(item));
+                if (fallbackUrl && currentUrlCandidates.has(fallbackUrl)) return idx;
+                const multiImages = getHistoryMultiImages(item) || [];
+                for (const rawUrl of multiImages) {
+                    const resolved = normalizeHistoryNavComparableUrl(resolveHistoryUrl(item, rawUrl));
+                    if (resolved && currentUrlCandidates.has(resolved)) return idx;
+                }
+            }
         }
         const currentTimeRaw = currentItem?.startTime || currentItem?.created || currentItem?.timestamp;
         const currentTime = Number.isFinite(currentTimeRaw) ? currentTimeRaw : Number.parseFloat(currentTimeRaw);
@@ -7093,7 +7617,7 @@ function TapnowApp() {
             if (idxByFocus >= 0) return idxByFocus;
         }
         return 0;
-    }, [historyFocusId]);
+    }, [historyFocusId, getHistoryNavPreview, normalizeHistoryNavComparableUrl, resolveHistoryUrl, getHistoryMultiImages]);
     const getHistoryNavIndexById = useCallback((id) => {
         if (!id) return -1;
         return historyNavItems.findIndex(item => item?.id === id);
@@ -7162,11 +7686,12 @@ function TapnowApp() {
                 const newIdx = Math.max(0, currentIndex - 1);
                 if (newIdx === currentIndex) return;
                 const targetItem = historyNavItems[newIdx];
-                const displayUrl = resolveHistoryUrl(targetItem);
-                if (displayUrl) {
+                const preview = getHistoryNavPreview(targetItem);
+                if (preview?.url) {
                     setLightboxItem({
                         ...targetItem,
-                        url: displayUrl,
+                        url: preview.url,
+                        selectedMjImageIndex: preview.index,
                         storyboardContext: null
                     });
                 }
@@ -7178,11 +7703,12 @@ function TapnowApp() {
                 const newIdx = Math.min(historyNavItems.length - 1, currentIndex + 1);
                 if (newIdx === currentIndex) return;
                 const targetItem = historyNavItems[newIdx];
-                const displayUrl = resolveHistoryUrl(targetItem);
-                if (displayUrl) {
+                const preview = getHistoryNavPreview(targetItem);
+                if (preview?.url) {
                     setLightboxItem({
                         ...targetItem,
-                        url: displayUrl,
+                        url: preview.url,
+                        selectedMjImageIndex: preview.index,
                         storyboardContext: null
                     });
                 }
@@ -7197,7 +7723,7 @@ function TapnowApp() {
 
         window.addEventListener('keydown', handleHistoryKeyDown);
         return () => window.removeEventListener('keydown', handleHistoryKeyDown);
-    }, [historyOpen, historyNavItems, lightboxItem, resolveHistoryUrl, historyFocusId, historyFocusIndex, getHistoryNavIndexById]);
+    }, [historyOpen, historyNavItems, lightboxItem, getHistoryNavPreview, historyFocusId, historyFocusIndex, getHistoryNavIndexById]);
 
     useEffect(() => {
         if (!historyOpen) return;
@@ -7267,19 +7793,25 @@ function TapnowApp() {
 
     const compactHistoryItemForStorage = (item) => {
         const saved = { ...item };
-        const fallback = getHistoryFallbackUrl(saved, { allowLocalCache: false });
-        if (saved.url) saved.url = trimHistoryUrlForStorage(sanitizeHistoryUrlValue(saved.url, fallback, { allowLocalCache: false }));
-        if (saved.originalUrl) saved.originalUrl = trimHistoryUrlForStorage(sanitizeHistoryUrlValue(saved.originalUrl, fallback, { allowLocalCache: false }));
-        if (saved.mjOriginalUrl) saved.mjOriginalUrl = trimHistoryUrlForStorage(sanitizeHistoryUrlValue(saved.mjOriginalUrl, fallback, { allowLocalCache: false }));
+        const fallback = resolveSourceReferenceUrl(getHistoryFallbackUrl(saved, { allowLocalCache: false }));
+        const toStorageUrl = (url, customFallback = fallback) => {
+            const sourceRef = resolveSourceReferenceUrl(url);
+            return trimHistoryUrlForStorage(
+                sanitizeHistoryUrlValue(sourceRef, customFallback, { allowLocalCache: false })
+            );
+        };
+        if (saved.url) saved.url = toStorageUrl(saved.url);
+        if (saved.originalUrl) saved.originalUrl = toStorageUrl(saved.originalUrl);
+        if (saved.mjOriginalUrl) saved.mjOriginalUrl = toStorageUrl(saved.mjOriginalUrl);
         if (Array.isArray(saved.output_images)) {
             saved.output_images = saved.output_images
                 .slice(0, 12)
-                .map((url) => trimHistoryUrlForStorage(sanitizeHistoryUrlValue(url, fallback, { allowLocalCache: false })))
+                .map((url) => toStorageUrl(url))
                 .filter(Boolean);
         }
         if (Array.isArray(saved.mjImages)) {
             const sanitized = saved.mjImages
-                .map((url) => sanitizeHistoryUrlValue(url, fallback, { allowLocalCache: false }))
+                .map((url) => sanitizeHistoryUrlValue(resolveSourceReferenceUrl(url), fallback, { allowLocalCache: false }))
                 .filter(Boolean);
             if (sanitized.length === 0 && saved.mjOriginalUrl) {
                 saved.mjImages = null;
@@ -7296,14 +7828,23 @@ function TapnowApp() {
         }
         if (Array.isArray(saved.mjThumbnails)) {
             saved.mjThumbnails = saved.mjThumbnails
-                .map((url) => sanitizeHistoryUrlValue(url, fallback, { allowLocalCache: false }))
+                .map((url) => sanitizeHistoryUrlValue(resolveSourceReferenceUrl(url), fallback, { allowLocalCache: false }))
                 .filter(Boolean)
                 .map(trimHistoryUrlForStorage);
         }
         if (saved.thumbnailUrl) {
-            saved.thumbnailUrl = trimHistoryUrlForStorage(sanitizeHistoryUrlValue(saved.thumbnailUrl, fallback, { allowLocalCache: false }));
+            saved.thumbnailUrl = toStorageUrl(saved.thumbnailUrl);
         }
         delete saved.mjImageInfo;
+        if (saved.localCacheMap && typeof saved.localCacheMap === 'object') {
+            const nextCacheMap = {};
+            Object.entries(saved.localCacheMap).forEach(([sourceUrl, cacheUrl]) => {
+                const normalizedSource = toStorageUrl(sourceUrl, '');
+                if (!normalizedSource || !cacheUrl) return;
+                nextCacheMap[normalizedSource] = cacheUrl;
+            });
+            saved.localCacheMap = nextCacheMap;
+        }
         saved.localCacheMap = compactCacheMapForStorage(saved.localCacheMap);
         saved.localCacheUrl = saved.localCacheUrl || null;
         saved.localFilePath = saved.localFilePath || null;
@@ -7322,7 +7863,7 @@ function TapnowApp() {
                 const reduced = historyToSave.map(item => ({
                     id: item.id,
                     type: item.type,
-                    url: trimHistoryUrlForStorage(item.url),
+                    url: trimHistoryUrlForStorage(resolveSourceReferenceUrl(item.url)),
                     prompt: item.prompt?.substring(0, 200) || '',
                     time: item.time,
                     status: item.status,
@@ -7330,7 +7871,7 @@ function TapnowApp() {
                     width: item.width,
                     height: item.height,
                     ratio: item.ratio,
-                    mjImages: Array.isArray(item.mjImages) ? item.mjImages.slice(0, 8).map(trimHistoryUrlForStorage) : item.mjImages,
+                    mjImages: Array.isArray(item.mjImages) ? item.mjImages.slice(0, 8).map((url) => trimHistoryUrlForStorage(resolveSourceReferenceUrl(url))) : item.mjImages,
                     selectedMjImageIndex: item.selectedMjImageIndex,
                     mjRatio: item.mjRatio,
                     mjNeedsSplit: item.mjNeedsSplit
@@ -7343,7 +7884,7 @@ function TapnowApp() {
                     const minimal = historyToSave.map(item => ({
                         id: item.id,
                         type: item.type,
-                        url: trimHistoryUrlForStorage(item.url),
+                        url: trimHistoryUrlForStorage(resolveSourceReferenceUrl(item.url)),
                         prompt: item.prompt?.substring(0, 100) || '',
                         time: item.time,
                         status: item.status,
@@ -7370,7 +7911,7 @@ function TapnowApp() {
                 const reduced = historyItems.map(item => ({
                     id: item.id,
                     type: item.type,
-                    url: trimHistoryUrlForStorage(item.url),
+                    url: trimHistoryUrlForStorage(resolveSourceReferenceUrl(item.url)),
                     prompt: item.prompt?.substring(0, 200) || '',
                     time: item.time,
                     status: item.status,
@@ -7378,8 +7919,8 @@ function TapnowApp() {
                     width: item.width,
                     height: item.height,
                     ratio: item.ratio,
-                    output_images: Array.isArray(item.output_images) ? item.output_images.slice(0, 8).map(trimHistoryUrlForStorage) : item.output_images,
-                    mjImages: Array.isArray(item.mjImages) ? item.mjImages.slice(0, 8).map(trimHistoryUrlForStorage) : item.mjImages,
+                    output_images: Array.isArray(item.output_images) ? item.output_images.slice(0, 8).map((url) => trimHistoryUrlForStorage(resolveSourceReferenceUrl(url))) : item.output_images,
+                    mjImages: Array.isArray(item.mjImages) ? item.mjImages.slice(0, 8).map((url) => trimHistoryUrlForStorage(resolveSourceReferenceUrl(url))) : item.mjImages,
                     selectedMjImageIndex: item.selectedMjImageIndex,
                     mjRatio: item.mjRatio,
                     mjNeedsSplit: item.mjNeedsSplit
@@ -7489,6 +8030,8 @@ function TapnowApp() {
                 videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
                 supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                 supportsHD: !!entry.supportsHD,
+                omitRatioOnSubmit: !!entry.omitRatioOnSubmit,
+                omitResolutionOnSubmit: !!entry.omitResolutionOnSubmit,
                 customParams: normalizeCustomParams(entry.customParams),
                 asyncConfig: normalizeAsyncConfig(entry.asyncConfig),
                 previewOverrideEnabled: !!entry.previewOverrideEnabled,
@@ -7527,6 +8070,8 @@ function TapnowApp() {
             videoResolutionNotesEnabled: resolvedLibrary ? !!resolvedLibrary.videoResolutionNotesEnabled : !!config.videoResolutionNotesEnabled,
             supportsFirstLastFrame: resolvedLibrary ? !!resolvedLibrary.supportsFirstLastFrame : !!config.supportsFirstLastFrame,
             supportsHD: resolvedLibrary ? !!resolvedLibrary.supportsHD : !!config.supportsHD,
+            omitRatioOnSubmit: resolvedLibrary ? !!resolvedLibrary.omitRatioOnSubmit : !!config.omitRatioOnSubmit,
+            omitResolutionOnSubmit: resolvedLibrary ? !!resolvedLibrary.omitResolutionOnSubmit : !!config.omitResolutionOnSubmit,
             customParams: resolvedLibrary ? normalizeCustomParams(resolvedLibrary.customParams) : normalizeCustomParams(config.customParams),
             asyncConfig: normalizeAsyncConfig(resolvedLibrary?.asyncConfig || config.asyncConfig),
             previewOverrideEnabled: resolvedLibrary ? !!resolvedLibrary.previewOverrideEnabled : !!config.previewOverrideEnabled,
@@ -7777,13 +8322,22 @@ function TapnowApp() {
                 onTouchStart={(e) => e.stopPropagation()}
             >
                 <div className={`text-[10px] font-medium ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('自定义参数')}</div>
-                {customParams.map((param) => {
-                    const paramId = param.id || param.name;
-                    const selectedValue = getCustomParamSelection(param, values);
+                {customParams.map((param, index) => {
+                    const paramId = param.id || param.name || `param-${index}`;
+                    const selectedValueRaw = getCustomParamSelection(param, values);
+                    const selectedValue = selectedValueRaw === null || selectedValueRaw === undefined
+                        ? ''
+                        : String(selectedValueRaw);
                     const options = Array.isArray(param.values) ? param.values : [];
                     const inputMode = isCustomParamInputMode(param);
                     const filteredOptions = options.filter((option) => !/^(input|输入)$/i.test(String(option || '').trim()));
                     const paramLabel = param?.name || param?.label || param?.displayName || param?.paramName || param?.key || param?.id || '参数';
+                    const clearParamSelection = (target) => {
+                        if (!target || typeof target !== 'object') return;
+                        if (param.id) delete target[param.id];
+                        if (param.name) delete target[param.name];
+                        if (paramId) delete target[paramId];
+                    };
                     return (
                         <div key={paramId} className="flex items-center gap-2">
                             <span
@@ -7800,10 +8354,9 @@ function TapnowApp() {
                                         onChange={(e) => {
                                             const nextValue = e.target.value;
                                             const next = { ...values };
+                                            clearParamSelection(next);
                                             if (nextValue) {
                                                 next[paramId] = nextValue;
-                                            } else {
-                                                delete next[paramId];
                                             }
                                             onChange(next);
                                         }}
@@ -7832,10 +8385,9 @@ function TapnowApp() {
                                     onChange={(e) => {
                                         const nextValue = e.target.value;
                                         const next = { ...values };
+                                        clearParamSelection(next);
                                         if (nextValue) {
                                             next[paramId] = nextValue;
-                                        } else {
-                                            delete next[paramId];
                                         }
                                         onChange(next);
                                     }}
@@ -7860,10 +8412,9 @@ function TapnowApp() {
                                     onChange={(e) => {
                                         const nextValue = e.target.value;
                                         const next = { ...values };
+                                        clearParamSelection(next);
                                         if (nextValue) {
                                             next[paramId] = nextValue;
-                                        } else {
-                                            delete next[paramId];
                                         }
                                         onChange(next);
                                     }}
@@ -7956,6 +8507,73 @@ function TapnowApp() {
         const withAuto = normalized.includes('Auto') ? normalized : ['Auto', ...normalized];
         return Array.from(new Set(withAuto));
     }, [getApiConfigByKey]);
+    const getDefaultCustomParamsForModel = useCallback((modelId, currentSelections = null) => {
+        const config = getApiConfigByKey(modelId);
+        const customParams = Array.isArray(config?.customParams) ? config.customParams : [];
+        if (!customParams.length) return {};
+        const next = {};
+        customParams.forEach((param, index) => {
+            const paramId = param.id || param.name || `param-${index}`;
+            if (!paramId) return;
+            let value = getCustomParamSelection(param, currentSelections || {});
+            if (value === undefined || value === null) value = '';
+            value = String(value).trim();
+            const options = Array.isArray(param.values) ? param.values : [];
+            if (value && options.length > 0 && !isCustomParamInputMode(param) && !options.includes(value)) {
+                value = '';
+            }
+            if (value) next[paramId] = value;
+        });
+        return next;
+    }, [getApiConfigByKey]);
+    const getNodeRecommendedHeight = useCallback((nodeType, modelId) => {
+        const config = getApiConfigByKey(modelId);
+        const customParamCount = Array.isArray(config?.customParams) ? config.customParams.length : 0;
+        if (nodeType === 'gen-image') {
+            return Math.min(860, 340 + Math.max(0, customParamCount - 1) * 36);
+        }
+        if (nodeType === 'gen-video') {
+            return Math.min(900, 420 + Math.max(0, customParamCount - 1) * 36);
+        }
+        return 0;
+    }, [getApiConfigByKey]);
+    const applyNodeModelSelection = useCallback((nodeId, nodeType, modelKey) => {
+        if (!nodeId || !modelKey) return;
+        const resolvedModel = resolveModelKey(modelKey);
+        if (!resolvedModel) return;
+        setNodes((prev) => prev.map((node) => {
+            if (node.id !== nodeId) return node;
+            const nextSettings = { ...(node.settings || {}), model: resolvedModel };
+            if (nodeType === 'gen-image') {
+                const ratioOptions = getRatiosForModel(resolvedModel);
+                const fallbackRatio = ratioOptions.find((value) => value !== 'Auto') || ratioOptions[0] || '1:1';
+                const currentRatio = nextSettings.ratio || '';
+                nextSettings.ratio = ratioOptions.includes(currentRatio) ? currentRatio : fallbackRatio;
+                const resolutionOptions = getResolutionsForModel(resolvedModel);
+                const fallbackResolution = resolutionOptions.find((value) => value !== 'Auto') || resolutionOptions[0] || '2K';
+                const currentResolution = normalizeImageResolution(nextSettings.resolution || '');
+                nextSettings.resolution = resolutionOptions.includes(currentResolution) ? currentResolution : fallbackResolution;
+            } else if (nodeType === 'gen-video') {
+                const ratioOptions = getRatiosForModel(resolvedModel);
+                const fallbackRatio = ratioOptions.find((value) => value !== 'Auto') || ratioOptions[0] || '16:9';
+                const currentRatio = nextSettings.ratio || '';
+                nextSettings.ratio = ratioOptions.includes(currentRatio) ? currentRatio : fallbackRatio;
+                const resolutionOptions = getVideoResolutionsForModel(resolvedModel);
+                const fallbackResolution = resolutionOptions.find((value) => value !== 'Auto') || resolutionOptions[0] || '720P';
+                const currentResolution = normalizeVideoResolution(nextSettings.resolution || '');
+                nextSettings.resolution = resolutionOptions.includes(currentResolution) ? currentResolution : fallbackResolution;
+            }
+            nextSettings.customParams = getDefaultCustomParamsForModel(resolvedModel, node.settings?.customParams || {});
+            const recommendedHeight = getNodeRecommendedHeight(nodeType, resolvedModel);
+            const currentHeight = Number(node.height) || 0;
+            const nextHeight = recommendedHeight > 0 ? Math.max(currentHeight, recommendedHeight) : currentHeight;
+            return {
+                ...node,
+                settings: nextSettings,
+                ...(nextHeight !== currentHeight ? { height: nextHeight } : {})
+            };
+        }));
+    }, [resolveModelKey, getRatiosForModel, getResolutionsForModel, getVideoResolutionsForModel, getDefaultCustomParamsForModel, getNodeRecommendedHeight]);
 
     // 使用 useMemo 创建 history Map，优化历史记录查找性能（O(1) 查找）
     const historyMap = useMemo(() => {
@@ -9365,9 +9983,7 @@ function TapnowApp() {
         const cache = new Map(); // nodeId -> { inputType -> images[] }
         const resolveConnectedUrl = (url) => {
             if (!url) return url;
-            if (!localCacheActive || !historyLocalCacheMap) return url;
-            const cached = historyLocalCacheMap.get(url);
-            return cached || url;
+            return resolveAssetChannelUrl(url);
         };
         connections.forEach(conn => {
             const inputType = conn.inputType || 'default';
@@ -9435,7 +10051,7 @@ function TapnowApp() {
         });
         return cache;
         // V3.7.5: 添加 activeShot 为依赖，确保分镜表切换镜头时缓存失效
-    }, [connections, nodesMap, nodes, activeShot, localCacheActive, historyLocalCacheMap]);
+    }, [connections, nodesMap, nodes, activeShot, resolveAssetChannelUrl]);
 
     const getConnectedInputImages = useCallback((targetNodeId, inputType = 'default') => {
         const nodeCache = connectedImagesCache.get(targetNodeId);
@@ -9698,6 +10314,8 @@ function TapnowApp() {
             videoResolutionNotesEnabled: false,
             supportsFirstLastFrame: false,
             supportsHD: false,
+            omitRatioOnSubmit: false,
+            omitResolutionOnSubmit: false,
             apiType: 'openai',
             customParams: [],
             asyncConfig: null,
@@ -9734,12 +10352,15 @@ function TapnowApp() {
         }
         const cloned = JSON.parse(JSON.stringify(source));
         const displayBase = cloned.displayName || cloned.modelName || cloned.id || newId;
+        const duplicatedParams = Array.isArray(cloned.customParams)
+            ? cloned.customParams.map((param) => ({ ...param, id: '' }))
+            : [];
         const newEntry = {
             ...cloned,
             id: newId,
             displayName: `${displayBase}（复制）`,
             modelName: cloned.modelName || cloned.id || newId,
-            customParams: normalizeCustomParams(cloned.customParams),
+            customParams: normalizeCustomParams(duplicatedParams),
             requestTemplate: normalizeRequestTemplate(cloned.requestTemplate || getDefaultRequestTemplateForEntry(cloned)),
             previewOverridePatch: normalizePreviewOverridePatch(cloned.previewOverridePatch),
             requestOverridePatch: normalizeRequestOverridePatch(cloned.requestOverridePatch)
@@ -9798,7 +10419,8 @@ function TapnowApp() {
                 values: [],
                 override: false,
                 notesEnabled: false,
-                valueNotes: {}
+                valueNotes: {},
+                defaultValue: ''
             });
             return { ...entry, customParams: nextParams };
         }));
@@ -11135,19 +11757,90 @@ function TapnowApp() {
 
     const resolveHistoryPayloadUrl = useCallback((payload, specificUrl = null) => {
         if (!payload) return '';
-        const rawUrl = specificUrl || payload.url || payload.originalUrl || payload.mjOriginalUrl || '';
-        if (!rawUrl) return '';
+        const candidates = [specificUrl, payload.url, payload.originalUrl, payload.mjOriginalUrl]
+            .filter((url) => typeof url === 'string' && url);
         const historyItem = payload.itemId ? historyMap.get(payload.itemId) : null;
-        if (historyItem) return resolveHistoryUrl(historyItem, rawUrl);
-        return rawUrl;
-    }, [historyMap, resolveHistoryUrl]);
+        if (historyItem) {
+            for (const url of candidates) {
+                const resolved = resolveAssetChannelUrl(resolveHistoryUrl(historyItem, url), { historyItem });
+                if (resolved) return resolved;
+            }
+            const fallback = resolveAssetChannelUrl(resolveHistoryUrl(historyItem), { historyItem });
+            if (fallback) return fallback;
+        }
+        for (const url of candidates) {
+            const resolved = resolveAssetChannelUrl(url);
+            if (resolved) return resolved;
+        }
+        return '';
+    }, [historyMap, resolveHistoryUrl, resolveAssetChannelUrl]);
 
     const resolveHistoryPayloadImages = useCallback((payload) => {
         if (!payload || !Array.isArray(payload.mjImages) || payload.mjImages.length === 0) return null;
         const historyItem = payload.itemId ? historyMap.get(payload.itemId) : null;
-        if (!historyItem) return payload.mjImages;
-        return payload.mjImages.map((url) => resolveHistoryUrl(historyItem, url));
-    }, [historyMap, resolveHistoryUrl]);
+        const resolved = historyItem
+            ? payload.mjImages.map((url) => resolveAssetChannelUrl(resolveHistoryUrl(historyItem, url), { historyItem }))
+            : payload.mjImages.map((url) => resolveAssetChannelUrl(url));
+        const filtered = resolved.filter(Boolean);
+        return filtered.length > 0 ? filtered : null;
+    }, [historyMap, resolveHistoryUrl, resolveAssetChannelUrl]);
+
+    const resolveDroppedUrlCandidate = useCallback((url, type = null) => {
+        const normalized = resolveAssetChannelUrl(url);
+        if (!normalized) return '';
+        return normalizeHistoryVideoUrl(normalized, type);
+    }, [resolveAssetChannelUrl]);
+
+    const rewriteAssetRouteValue = useCallback((value) => {
+        if (typeof value === 'string') {
+            const next = resolveAssetChannelUrl(value);
+            return next || '';
+        }
+        if (Array.isArray(value)) {
+            let changed = false;
+            const mapped = value.map((entry) => {
+                const next = rewriteAssetRouteValue(entry);
+                if (next !== entry) changed = true;
+                return next;
+            });
+            return changed ? mapped : value;
+        }
+        if (!value || typeof value !== 'object') return value;
+        let changed = false;
+        let nextObj = value;
+        Object.keys(value).forEach((key) => {
+            const current = value[key];
+            const next = rewriteAssetRouteValue(current);
+            if (next === current) return;
+            if (!changed) nextObj = { ...value };
+            nextObj[key] = next;
+            changed = true;
+        });
+        return changed ? nextObj : value;
+    }, [resolveAssetChannelUrl]);
+
+    useEffect(() => {
+        setNodes((prev) => {
+            let changed = false;
+            const next = prev.map((node) => {
+                const sanitized = rewriteAssetRouteValue(node);
+                if (sanitized !== node) changed = true;
+                return sanitized;
+            });
+            return changed ? next : prev;
+        });
+        setChatFiles((prev) => {
+            let changed = false;
+            const next = prev.map((file) => {
+                if (!file || typeof file !== 'object') return file;
+                const nextContent = rewriteAssetRouteValue(file.content);
+                if (nextContent === file.content) return file;
+                changed = true;
+                return { ...file, content: nextContent };
+            });
+            return changed ? next : prev;
+        });
+    }, [localCacheEnabled, localCacheActive, localCacheIndexTick, cacheRefreshTick, rewriteAssetRouteValue]);
 
     const getDragUrlCandidate = (e) => {
         const uriList = e.dataTransfer.getData('text/uri-list') || '';
@@ -11166,7 +11859,7 @@ function TapnowApp() {
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const dragUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
+            const dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (dragUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
                 let dimensions = null;
@@ -11184,7 +11877,7 @@ function TapnowApp() {
             }
         }
 
-        const dragUrlCandidate = getDragUrlCandidate(e);
+        const dragUrlCandidate = resolveDroppedUrlCandidate(getDragUrlCandidate(e));
         if (dragUrlCandidate) {
             const isVideo = isVideoUrl(dragUrlCandidate);
             let dimensions = null;
@@ -11264,7 +11957,7 @@ function TapnowApp() {
         let previewType = 'image';
 
         if (payload) {
-            dragUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
+            dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (payload.mjImages && payload.mjImages.length > 1) {
                 previewImages = resolveHistoryPayloadImages(payload);
                 const selectedIndex = payload.selectedIndex ?? 0;
@@ -11277,8 +11970,8 @@ function TapnowApp() {
         if (!dragUrl) {
             const candidate = getDragUrlCandidate(e);
             if (candidate) {
-                dragUrl = candidate;
-                previewType = isVideoUrl(candidate) ? 'video' : 'image';
+                dragUrl = resolveDroppedUrlCandidate(candidate);
+                previewType = isVideoUrl(dragUrl) ? 'video' : 'image';
             }
         }
 
@@ -11305,14 +11998,14 @@ function TapnowApp() {
         let dragUrl = '';
         let isVideo = false;
         if (payload) {
-            dragUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
+            dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
         }
         if (!dragUrl) {
             const candidate = getDragUrlCandidate(e);
             if (candidate) {
-                dragUrl = candidate;
-                isVideo = isVideoUrl(candidate);
+                dragUrl = resolveDroppedUrlCandidate(candidate);
+                isVideo = isVideoUrl(dragUrl);
             }
         }
         if (!dragUrl) return;
@@ -11337,7 +12030,7 @@ function TapnowApp() {
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const resolvedUrl = normalizeHistoryVideoUrl(resolveHistoryPayloadUrl(payload), payload.type);
+            const resolvedUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (resolvedUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(resolvedUrl);
                 const isImage = !isVideo;
@@ -11360,14 +12053,16 @@ function TapnowApp() {
 
         const candidate = getDragUrlCandidate(e);
         if (candidate) {
-            const isVideo = isVideoUrl(candidate);
+            const resolvedCandidate = resolveDroppedUrlCandidate(candidate);
+            if (!resolvedCandidate) return;
+            const isVideo = isVideoUrl(resolvedCandidate);
             const isImage = !isVideo;
             const fileExt = isImage ? 'png' : 'mp4';
             const mimeType = isImage ? 'image/png' : 'video/mp4';
             setChatFiles(prev => [...prev, {
                 name: `Dropped-${Date.now()}.${fileExt}`,
                 type: mimeType,
-                content: candidate,
+                content: resolvedCandidate,
                 isImage,
                 isVideo,
                 isAudio: false,
@@ -13650,6 +14345,8 @@ function TapnowApp() {
                 const apiType = credentials.apiType || providers[providerKey]?.apiType || 'openai';
                 const useProxy = !!credentials.useProxy;
                 const forceAsync = !!credentials.forceAsync;
+                const omitRatioOnSubmit = !!config?.omitRatioOnSubmit;
+                const omitResolutionOnSubmit = !!config?.omitResolutionOnSubmit;
                 const requestTemplate = normalizeRequestTemplate(config?.requestTemplate);
                 const requestOverrideEnabled = !!config?.requestOverrideEnabled;
                 const requestOverridePatch = normalizeRequestOverridePatch(config?.requestOverridePatch);
@@ -13661,6 +14358,151 @@ function TapnowApp() {
                 const resolveSourceProxy = (url) => getProxyPreferenceForUrl(url, useProxy);
                 const asyncConfig = normalizeAsyncConfig(config?.asyncConfig)
                     || ((baseUrl && String(baseUrl).includes('127.0.0.1:9527')) ? normalizeAsyncConfig(ASYNC_CONFIG_TEMPLATE) : null);
+                const isLocalMiddlewareTarget = (() => {
+                    try {
+                        const parsed = new URL(String(baseUrl || ''));
+                        const isLocalHost = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
+                        return isLocalHost && parsed.port === '9527';
+                    } catch (e) {
+                        const raw = String(baseUrl || '');
+                        return raw.includes('127.0.0.1:9527') || raw.includes('localhost:9527');
+                    }
+                })();
+                const normalizeRequestInputUrl = (rawUrl) => {
+                    if (!rawUrl || typeof rawUrl !== 'string') return '';
+                    let next = sanitizeHistoryUrlValue(rawUrl, '', { allowLocalCache: true }) || '';
+                    if (!next) return '';
+                    try {
+                        const parsed = new URL(String(next));
+                        const isLocalHost = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost';
+                        if (isLocalHost && parsed.pathname === '/proxy') {
+                            const unwrapped = parsed.searchParams.get('url');
+                            if (unwrapped) next = unwrapped;
+                        }
+                    } catch (e) { }
+                    if (isLocalCacheUrl(next)) {
+                        const source = resolveLocalCacheSourceUrl(next);
+                        if (source) next = source;
+                        else if (!isLocalMiddlewareTarget) return '';
+                    }
+                    if (!isLocalMiddlewareTarget && isComfyLocalUrl(next)) {
+                        return '';
+                    }
+                    return next;
+                };
+                const normalizeRequestInputUrlAsync = async (rawUrl) => {
+                    const normalized = normalizeRequestInputUrl(rawUrl);
+                    if (!normalized) return '';
+                    if (LocalImageManager.isImageId(normalized) || normalized.startsWith('asset://')) {
+                        try {
+                            const resolved = await resolveSpecialUrl(normalized);
+                            if (resolved && typeof resolved === 'string') {
+                                return resolved.startsWith('data:')
+                                    ? normalizeDataUrl(resolved)
+                                    : resolved;
+                            }
+                        } catch (e) { }
+                        return '';
+                    }
+                    return normalized;
+                };
+                const rewriteTemplateInputMapUrls = (mapValue) => {
+                    if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return mapValue;
+                    let changed = false;
+                    const nextMap = { ...mapValue };
+                    Object.entries(mapValue).forEach(([key, val]) => {
+                        if (typeof val !== 'string') return;
+                        const trimmed = val.trim();
+                        if (!trimmed) return;
+                        const looksLikeUrl = /^(https?:|data:|blob:)/i.test(trimmed)
+                            || isLocalCacheUrl(trimmed)
+                            || isComfyLocalUrl(trimmed)
+                            || trimmed.includes('/proxy?url=')
+                            || trimmed.startsWith('asset://')
+                            || LocalImageManager.isImageId(trimmed);
+                        if (!looksLikeUrl) return;
+                        if (LocalImageManager.isImageId(trimmed)) {
+                            nextMap[key] = '';
+                            changed = true;
+                            return;
+                        }
+                        const normalized = normalizeRequestInputUrl(trimmed);
+                        if (!normalized) {
+                            nextMap[key] = '';
+                            changed = true;
+                            return;
+                        }
+                        if (normalized === val) return;
+                        nextMap[key] = normalized;
+                        changed = true;
+                    });
+                    return changed ? nextMap : mapValue;
+                };
+                const sanitizeTemplateInputMap = (mapValue) => {
+                    if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) return mapValue;
+                    const rewritten = rewriteTemplateInputMapUrls(mapValue);
+                    const nextMap = {};
+                    Object.entries(rewritten).forEach(([key, val]) => {
+                        if (val === '' || val === null || val === undefined) return;
+                        nextMap[key] = val;
+                    });
+                    return nextMap;
+                };
+                const sanitizeTemplateBodyInputs = (value) => {
+                    if (!value || typeof value !== 'object') return value;
+                    if (Array.isArray(value)) {
+                        let changed = false;
+                        const next = value.map((entry) => {
+                            const sanitized = sanitizeTemplateBodyInputs(entry);
+                            if (sanitized !== entry) changed = true;
+                            return sanitized;
+                        }).filter((entry) => {
+                            if (entry === '' || entry === null || entry === undefined) {
+                                changed = true;
+                                return false;
+                            }
+                            return true;
+                        });
+                        return changed ? next : value;
+                    }
+                    let changed = false;
+                    const nextObj = {};
+                    Object.entries(value).forEach(([key, val]) => {
+                        let nextVal = val;
+                        if (key === 'input_values' || key === 'inputs') {
+                            nextVal = sanitizeTemplateInputMap(val);
+                        } else {
+                            nextVal = sanitizeTemplateBodyInputs(val);
+                        }
+                        if (nextVal === '' || nextVal === null || nextVal === undefined) {
+                            changed = true;
+                            return;
+                        }
+                        if (nextVal !== val) changed = true;
+                        nextObj[key] = nextVal;
+                    });
+                    return changed ? nextObj : value;
+                };
+                const sanitizeTemplateRequestBody = (bodyValue) => {
+                    if (!bodyValue) return bodyValue;
+                    if (bodyValue instanceof FormData) return bodyValue;
+                    if (typeof bodyValue === 'string') {
+                        const trimmed = bodyValue.trim();
+                        if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return bodyValue;
+                        try {
+                            const parsed = JSON.parse(trimmed);
+                            const sanitized = sanitizeTemplateBodyInputs(parsed);
+                            if (sanitized === parsed) return bodyValue;
+                            return JSON.stringify(sanitized);
+                        } catch (e) {
+                            return bodyValue;
+                        }
+                    }
+                    if (typeof bodyValue === 'object') {
+                        return sanitizeTemplateBodyInputs(bodyValue);
+                    }
+                    return bodyValue;
+                };
 
                 // --- 模型特征定义 (融合 V2.5-3 和 V2.5-4) ---
                 // isBananaLike: 用于旧版/通用香蕉模型 (排除 nano-banana-2)
@@ -14089,13 +14931,40 @@ function TapnowApp() {
                     payload = applyPreviewOverridePatch(payload, config.previewOverridePatch);
                 }
 
-                const buildAsyncTemplateVars = () => {
+                const getTemplateImageSources = async (inputImages = []) => {
+                    const imageSources = [];
+                    for (const rawUrl of inputImages) {
+                        let normalized = await normalizeRequestInputUrlAsync(rawUrl);
+                        if (!normalized) continue;
+                        // 本地中间件下优先内联远程 URL，避免目标侧无法拉取带签名/防盗链图片
+                        if (isLocalMiddlewareTarget && /^https?:/i.test(normalized)) {
+                            try {
+                                const base64 = await getBase64FromUrl(normalized, { useProxy: resolveSourceProxy(normalized) });
+                                if (base64) {
+                                    const ext = getUrlExt(normalized, '.png');
+                                    const mime = ext === '.jpg' || ext === '.jpeg'
+                                        ? 'image/jpeg'
+                                        : ext === '.webp'
+                                            ? 'image/webp'
+                                            : 'image/png';
+                                    normalized = `data:${mime};base64,${base64}`;
+                                }
+                            } catch (e) {
+                                // 失败时保留 URL 继续尝试，避免完全阻断
+                            }
+                        }
+                        imageSources.push(normalized);
+                    }
+                    return imageSources;
+                };
+
+                const buildAsyncTemplateVars = async () => {
                     const vars = {
                         modelName: config?.modelName || modelId,
                         prompt: prompt || '',
-                        ratio,
-                        resolution,
-                        size: sizeStr,
+                        ratio: omitRatioOnSubmit ? '' : ratio,
+                        resolution: omitResolutionOnSubmit ? '' : resolution,
+                        size: (omitRatioOnSubmit || omitResolutionOnSubmit) ? '' : sizeStr,
                         duration: type === 'video' ? duration : undefined,
                         durationNumber: normalizeDurationValue(duration, 5),
                         seed: node?.settings?.seed,
@@ -14110,7 +14979,7 @@ function TapnowApp() {
                     const inputImages = connectedImages.length > 0
                         ? connectedImages
                         : (sourceImage ? [sourceImage] : []);
-                    const imageSources = inputImages.filter(Boolean);
+                    const imageSources = await getTemplateImageSources(inputImages);
                     if (imageSources.length > 0) {
                         vars.imageUrl = imageSources[0];
                         vars.imageUrls = imageSources;
@@ -14149,9 +15018,9 @@ function TapnowApp() {
                         const vars = {
                             modelName: config?.modelName || modelId,
                             prompt: prompt || '',
-                            ratio,
-                            resolution,
-                            size: sizeStr,
+                            ratio: omitRatioOnSubmit ? '' : ratio,
+                            resolution: omitResolutionOnSubmit ? '' : resolution,
+                            size: (omitRatioOnSubmit || omitResolutionOnSubmit) ? '' : sizeStr,
                             duration: type === 'video' ? duration : undefined,
                             durationNumber: normalizeDurationValue(duration, 5),
                             seed: node?.settings?.seed,
@@ -14166,7 +15035,7 @@ function TapnowApp() {
                         const inputImages = connectedImages.length > 0
                             ? connectedImages
                             : (sourceImage ? [sourceImage] : []);
-                        const imageSources = inputImages.filter(Boolean);
+                        const imageSources = await getTemplateImageSources(inputImages);
                         if (imageSources.length > 0) {
                             vars.imageUrl = imageSources[0];
                             vars.imageUrls = imageSources;
@@ -14247,6 +15116,7 @@ function TapnowApp() {
                         const templateVars = await buildRequestTemplateVars();
                         const templateRequest = buildRequestFromTemplate(requestTemplate, templateVars, { bodyType: requestTemplate.bodyType });
                         if (templateRequest && templateRequest.url) {
+                            templateRequest.body = sanitizeTemplateRequestBody(templateRequest.body);
                             requestOverride = requestOverrideEnabled && requestOverridePatch
                                 ? applyRequestOverridePatch({ ...templateRequest }, requestOverridePatch)
                                 : templateRequest;
@@ -14269,6 +15139,7 @@ function TapnowApp() {
                         ? { ...requestOverride.headers }
                         : {};
                     let requestBody = requestOverride && requestOverride.body !== undefined ? requestOverride.body : payload;
+                    requestBody = sanitizeTemplateRequestBody(requestBody);
                     if (requestBody instanceof FormData) {
                         overrideBodyType = 'multipart';
                     }
@@ -14499,7 +15370,7 @@ function TapnowApp() {
                 if (asyncConfig?.enabled) {
                     const requestId = getValueByPathAny(data, asyncConfig.requestIdPaths);
                     if (requestId && immediateImageCandidates.length === 0) {
-                        const asyncVars = buildAsyncTemplateVars();
+                        const asyncVars = await buildAsyncTemplateVars();
                         asyncVars.requestId = requestId;
                         setHistory((prev) => prev.map((hItem) =>
                             hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: requestId } : hItem
@@ -14513,7 +15384,7 @@ function TapnowApp() {
                     if (requestId && immediateImageCandidates.length === 0) {
                         const fallbackConfig = normalizeAsyncConfig(ASYNC_CONFIG_TEMPLATE);
                         if (fallbackConfig) {
-                            const asyncVars = buildAsyncTemplateVars();
+                            const asyncVars = await buildAsyncTemplateVars();
                             asyncVars.requestId = requestId;
                             setHistory((prev) => prev.map((hItem) =>
                                 hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: requestId } : hItem
@@ -15976,6 +16847,38 @@ function TapnowApp() {
         // 方案B：统一使用资产包（Zip）保存，避免 base64 膨胀与失败
         const shouldSaveHistoryAssets = saveHistoryAssets;
         const historySnapshot = history.slice(0, normalizeHistorySaveLimit(historySaveLimit));
+        const saveProjectJsonWithoutAssets = async (options = {}) => {
+            const preferLegacyDownload = !!options.preferLegacyDownload;
+            const payload = {
+                version: '2.5.7',
+                projectName,
+                theme,
+                nodes,
+                connections,
+                view,
+                history: historySnapshot.map((item) => compactHistoryItemForStorage(item)),
+                chatSessions,
+                characterLibrary,
+                modelLibrary,
+                timestamp: getCSTTimestamp(),
+                assetBundle: false
+            };
+            const jsonText = JSON.stringify(payload, (key, value) => (value === undefined ? null : value), 2);
+            const timestamp = getCSTFilenameTimestamp();
+            const filename = `${projectName || '未命名项目'}_${timestamp}.json`;
+            if (window.showSaveFilePicker && !preferLegacyDownload) {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: filename,
+                    types: [{ description: 'JSON File', accept: { 'application/json': ['.json'] } }],
+                });
+                const writable = await handle.createWritable();
+                await writable.write(jsonText);
+                await writable.close();
+            } else {
+                const blob = new Blob([jsonText], { type: 'application/json' });
+                saveAs(blob, filename);
+            }
+        };
         if (shouldSaveHistoryAssets) {
             const runBundleSave = async (projectData, bundleName, handle) => {
                 setDownloadProgress({ active: true, current: 0, total: 1, filename: bundleName });
@@ -16044,6 +16947,19 @@ function TapnowApp() {
                 console.error('项目打包保存失败:', e);
                 const msg = e?.message || String(e || '');
                 if (String(msg).toLowerCase().includes('quota')) {
+                    const shouldFallback = confirm(`项目打包保存失败: ${msg}\n\n是否自动降级为“仅保存项目JSON（不打包资产）”？\n\n降级后可保证保存成功率，但不会打包图片/视频二进制资产。`);
+                    if (shouldFallback) {
+                        try {
+                            // 降级路径通常已经离开用户手势上下文，避免再次调用 showSaveFilePicker
+                            await saveProjectJsonWithoutAssets({ preferLegacyDownload: true });
+                            alert('已降级为 JSON 保存（不含资产），保存完成。');
+                            return;
+                        } catch (fallbackError) {
+                            const fallbackMsg = fallbackError?.message || String(fallbackError || '');
+                            alert(`降级保存失败: ${fallbackMsg}\n\n建议操作：\n1) 进一步降低“历史保存上限”\n2) 清理历史后再保存`);
+                            return;
+                        }
+                    }
                     alert(`项目打包保存失败: ${msg}\n\n建议操作：\n1) 适当降低“历史保存上限”\n2) 或关闭“保存资产包（Zip）”后再保存`);
                 } else {
                     alert(`项目打包保存失败: ${msg}`);
@@ -16054,17 +16970,18 @@ function TapnowApp() {
         const convertHistoryAssetUrl = async (url, item, force = false) => {
             if (!url || typeof url !== 'string') return url;
             if (url.startsWith('data:')) return normalizeDataUrl(url);
-            if (!force && !shouldSaveHistoryAssets) return url;
+            const sourceRef = resolveSourceReferenceUrl(url);
+            if (!force && !shouldSaveHistoryAssets) return sourceRef;
             try {
                 const baseProxy = getItemProxyPreference(item);
-                const useProxy = getProxyPreferenceForUrl(url, baseProxy);
-                const { blob } = await fetchCacheSource(url, { useProxy, preferLocal: true });
-                if (!blob) return url;
+                const useProxy = getProxyPreferenceForUrl(sourceRef, baseProxy);
+                const { blob } = await fetchCacheSource(sourceRef, { useProxy, preferLocal: true });
+                if (!blob) return sourceRef;
                 const dataUrl = await blobToDataURL(blob);
                 return normalizeDataUrl(dataUrl);
             } catch (e) {
                 console.error('转换历史资源失败:', e);
-                return url;
+                return sourceRef;
             }
         };
         const convertHistoryItemBlobUrls = async (item) => {
@@ -16120,15 +17037,18 @@ function TapnowApp() {
                 const nodesToSave = JSON.parse(JSON.stringify(nodes, replacer));
                 const convertBlobUrlsToDataUrls = async (obj) => {
                     if (obj === null || obj === undefined) return obj;
-                    if (typeof obj === 'string' && obj.startsWith('blob:')) {
-                        try {
-                            const blob = await getBlobFromUrl(obj);
-                            const dataUrl = await blobToDataURL(blob);
-                            return dataUrl;
-                        } catch (error) {
-                            console.error('转换 Blob URL 失败:', error);
-                            return obj;
+                    if (typeof obj === 'string') {
+                        if (obj.startsWith('blob:')) {
+                            try {
+                                const blob = await getBlobFromUrl(obj);
+                                const dataUrl = await blobToDataURL(blob);
+                                return dataUrl;
+                            } catch (error) {
+                                console.error('转换 Blob URL 失败:', error);
+                                return resolveSourceReferenceUrl(obj);
+                            }
                         }
+                        return resolveSourceReferenceUrl(obj);
                     }
                     if (Array.isArray(obj)) {
                         return await Promise.all(obj.map(item => convertBlobUrlsToDataUrls(item)));
@@ -16147,9 +17067,7 @@ function TapnowApp() {
                 const nodesWithDataUrls = await convertBlobUrlsToDataUrls(nodesToSave);
                 const characterLibraryToSave = JSON.parse(JSON.stringify(characterLibrary, replacer));
                 const characterLibraryWithDataUrls = await convertBlobUrlsToDataUrls(characterLibraryToSave);
-                const historyToSave = shouldSaveHistoryAssets
-                    ? await Promise.all(historySnapshot.map(item => convertHistoryItemBlobUrls(item)))
-                    : historySnapshot;
+                const historyToSave = await Promise.all(historySnapshot.map(item => convertHistoryItemBlobUrls(item)));
                 const projectData = {
                     version: '2.5.7',
                     projectName,
@@ -16197,23 +17115,31 @@ function TapnowApp() {
                 const nodeCopy = { ...node };
 
                 // 转换 content
-                if (nodeCopy.content && typeof nodeCopy.content === 'string' && nodeCopy.content.startsWith('blob:')) {
-                    try {
-                        const b64 = await getBase64FromUrl(nodeCopy.content);
-                        const mime = isVideoUrl(nodeCopy.content) ? 'video/mp4' : 'image/png';
-                        nodeCopy.content = `data:${mime};base64,${b64}`;
-                    } catch (e) {
-                        console.error('转换节点 content 失败:', e);
+                if (nodeCopy.content && typeof nodeCopy.content === 'string') {
+                    if (nodeCopy.content.startsWith('blob:')) {
+                        try {
+                            const b64 = await getBase64FromUrl(nodeCopy.content);
+                            const mime = isVideoUrl(nodeCopy.content) ? 'video/mp4' : 'image/png';
+                            nodeCopy.content = `data:${mime};base64,${b64}`;
+                        } catch (e) {
+                            console.error('转换节点 content 失败:', e);
+                        }
+                    } else {
+                        nodeCopy.content = resolveSourceReferenceUrl(nodeCopy.content);
                     }
                 }
 
                 // 转换 maskContent
-                if (nodeCopy.maskContent && typeof nodeCopy.maskContent === 'string' && nodeCopy.maskContent.startsWith('blob:')) {
-                    try {
-                        const b64 = await getBase64FromUrl(nodeCopy.maskContent);
-                        nodeCopy.maskContent = `data:image/png;base64,${b64}`;
-                    } catch (e) {
-                        console.error('转换节点 maskContent 失败:', e);
+                if (nodeCopy.maskContent && typeof nodeCopy.maskContent === 'string') {
+                    if (nodeCopy.maskContent.startsWith('blob:')) {
+                        try {
+                            const b64 = await getBase64FromUrl(nodeCopy.maskContent);
+                            nodeCopy.maskContent = `data:image/png;base64,${b64}`;
+                        } catch (e) {
+                            console.error('转换节点 maskContent 失败:', e);
+                        }
+                    } else {
+                        nodeCopy.maskContent = resolveSourceReferenceUrl(nodeCopy.maskContent);
                     }
                 }
 
@@ -16228,6 +17154,8 @@ function TapnowApp() {
                             } catch (e) {
                                 console.error('转换关键帧失败:', e);
                             }
+                        } else if (frame && frame.url && typeof frame.url === 'string') {
+                            frame.url = resolveSourceReferenceUrl(frame.url);
                         }
                     }
                 }
@@ -16243,6 +17171,8 @@ function TapnowApp() {
                             } catch (e) {
                                 console.error('转换帧失败:', e);
                             }
+                        } else if (frame && frame.url && typeof frame.url === 'string') {
+                            frame.url = resolveSourceReferenceUrl(frame.url);
                         }
                     }
                 }
@@ -16258,6 +17188,8 @@ function TapnowApp() {
                             } catch (e) {
                                 console.error('转换 previewMjImages 失败:', e);
                             }
+                        } else if (url && typeof url === 'string') {
+                            nodeCopy.previewMjImages[i] = resolveSourceReferenceUrl(url);
                         }
                     }
                 }
@@ -16277,6 +17209,8 @@ function TapnowApp() {
                     } catch (e) {
                         console.error('转换角色 avatar 失败:', e);
                     }
+                } else if (charCopy.avatar && typeof charCopy.avatar === 'string') {
+                    charCopy.avatar = resolveSourceReferenceUrl(charCopy.avatar);
                 }
 
                 // 转换 profile_picture_url
@@ -16287,6 +17221,8 @@ function TapnowApp() {
                     } catch (e) {
                         console.error('转换角色 profile_picture_url 失败:', e);
                     }
+                } else if (charCopy.profile_picture_url && typeof charCopy.profile_picture_url === 'string') {
+                    charCopy.profile_picture_url = resolveSourceReferenceUrl(charCopy.profile_picture_url);
                 }
 
                 return charCopy;
@@ -16433,15 +17369,18 @@ function TapnowApp() {
                 const nodesToSave = JSON.parse(JSON.stringify(selectedNodes, replacer));
                 const convertBlobUrlsToDataUrls = async (obj) => {
                     if (obj === null || obj === undefined) return obj;
-                    if (typeof obj === 'string' && obj.startsWith('blob:')) {
-                        try {
-                            const blob = await getBlobFromUrl(obj);
-                            const dataUrl = await blobToDataURL(blob);
-                            return dataUrl;
-                        } catch (error) {
-                            console.error('转换 Blob URL 失败:', error);
-                            return obj;
+                    if (typeof obj === 'string') {
+                        if (obj.startsWith('blob:')) {
+                            try {
+                                const blob = await getBlobFromUrl(obj);
+                                const dataUrl = await blobToDataURL(blob);
+                                return dataUrl;
+                            } catch (error) {
+                                console.error('转换 Blob URL 失败:', error);
+                                return resolveSourceReferenceUrl(obj);
+                            }
                         }
+                        return resolveSourceReferenceUrl(obj);
                     }
                     if (Array.isArray(obj)) {
                         return await Promise.all(obj.map(item => convertBlobUrlsToDataUrls(item)));
@@ -16494,22 +17433,30 @@ function TapnowApp() {
             const convertNodeBlobUrls = async (node) => {
                 const nodeCopy = { ...node };
 
-                if (nodeCopy.content && typeof nodeCopy.content === 'string' && nodeCopy.content.startsWith('blob:')) {
-                    try {
-                        const b64 = await getBase64FromUrl(nodeCopy.content);
-                        const mime = isVideoUrl(nodeCopy.content) ? 'video/mp4' : 'image/png';
-                        nodeCopy.content = `data:${mime};base64,${b64}`;
-                    } catch (e) {
-                        console.error('转换节点 content 失败:', e);
+                if (nodeCopy.content && typeof nodeCopy.content === 'string') {
+                    if (nodeCopy.content.startsWith('blob:')) {
+                        try {
+                            const b64 = await getBase64FromUrl(nodeCopy.content);
+                            const mime = isVideoUrl(nodeCopy.content) ? 'video/mp4' : 'image/png';
+                            nodeCopy.content = `data:${mime};base64,${b64}`;
+                        } catch (e) {
+                            console.error('转换节点 content 失败:', e);
+                        }
+                    } else {
+                        nodeCopy.content = resolveSourceReferenceUrl(nodeCopy.content);
                     }
                 }
 
-                if (nodeCopy.maskContent && typeof nodeCopy.maskContent === 'string' && nodeCopy.maskContent.startsWith('blob:')) {
-                    try {
-                        const b64 = await getBase64FromUrl(nodeCopy.maskContent);
-                        nodeCopy.maskContent = `data:image/png;base64,${b64}`;
-                    } catch (e) {
-                        console.error('转换节点 maskContent 失败:', e);
+                if (nodeCopy.maskContent && typeof nodeCopy.maskContent === 'string') {
+                    if (nodeCopy.maskContent.startsWith('blob:')) {
+                        try {
+                            const b64 = await getBase64FromUrl(nodeCopy.maskContent);
+                            nodeCopy.maskContent = `data:image/png;base64,${b64}`;
+                        } catch (e) {
+                            console.error('转换节点 maskContent 失败:', e);
+                        }
+                    } else {
+                        nodeCopy.maskContent = resolveSourceReferenceUrl(nodeCopy.maskContent);
                     }
                 }
 
@@ -16523,6 +17470,8 @@ function TapnowApp() {
                             } catch (e) {
                                 console.error('转换关键帧失败:', e);
                             }
+                        } else if (frame && frame.url && typeof frame.url === 'string') {
+                            frame.url = resolveSourceReferenceUrl(frame.url);
                         }
                     }
                 }
@@ -16537,6 +17486,8 @@ function TapnowApp() {
                             } catch (e) {
                                 console.error('转换帧失败:', e);
                             }
+                        } else if (frame && frame.url && typeof frame.url === 'string') {
+                            frame.url = resolveSourceReferenceUrl(frame.url);
                         }
                     }
                 }
@@ -16551,6 +17502,8 @@ function TapnowApp() {
                             } catch (e) {
                                 console.error('转换预览图片失败:', e);
                             }
+                        } else if (imgUrl && typeof imgUrl === 'string') {
+                            nodeCopy.previewMjImages[i] = resolveSourceReferenceUrl(imgUrl);
                         }
                     }
                 }
@@ -16747,6 +17700,8 @@ function TapnowApp() {
                     videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
                     supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                     supportsHD: !!entry.supportsHD,
+                    omitRatioOnSubmit: !!entry.omitRatioOnSubmit,
+                    omitResolutionOnSubmit: !!entry.omitResolutionOnSubmit,
                     customParams: normalizeCustomParams(entry.customParams),
                     asyncConfig: entry.asyncConfig && typeof entry.asyncConfig === 'object' ? entry.asyncConfig : null,
                     requestTemplate: normalizeRequestTemplate(entry.requestTemplate || getDefaultRequestTemplateForEntry(entry)),
@@ -17103,9 +18058,9 @@ function TapnowApp() {
     const addNode = (type, worldX, worldY, sourceId, initialContent = undefined, initialDimensions = undefined, targetId = undefined, inputType = undefined) => {
         saveToUndoStack(); // V3.4.6: 保存到撤销栈
         const defaultSize = type === 'gen-video'
-            ? { w: 380, h: 420 }
+            ? { w: 400, h: 500 }
             : type === 'gen-image'
-                ? { w: 440, h: 340 }
+                ? { w: 440, h: 420 }
                 : type === 'video-input'
                     ? { w: 580, h: 460 }
                     : type === 'video-analyze'
@@ -19967,7 +20922,7 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            const dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (dragUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
                 if (isVideo) {
@@ -19989,7 +20944,7 @@ ${inputText.substring(0, 15000)} ... (截断)
             }
         }
 
-        const dragUrlCandidate = getDragUrlCandidate(e);
+        const dragUrlCandidate = resolveDroppedUrlCandidate(getDragUrlCandidate(e));
         if (dragUrlCandidate) {
             if (isVideoUrl(dragUrlCandidate)) {
                 let videoMeta = { duration: 0, w: 0, h: 0 };
@@ -20107,14 +21062,14 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const dragUrl = payload.url || payload.originalUrl || payload.mjOriginalUrl || '';
+            const dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (dragUrl && !(payload.type === 'video' || isVideoUrl(dragUrl))) {
                 insertKeyframesFromUrls(nodeId, [dragUrl], insertIdx);
             }
             return;
         }
 
-        const dragUrlCandidate = getDragUrlCandidate(e);
+        const dragUrlCandidate = resolveDroppedUrlCandidate(getDragUrlCandidate(e));
         if (dragUrlCandidate && !isVideoUrl(dragUrlCandidate)) {
             insertKeyframesFromUrls(nodeId, [dragUrlCandidate], insertIdx);
             return;
@@ -20861,7 +21816,7 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            const dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (dragUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
                 await createLinkedInputNode(targetNode, dragUrl, isVideo);
@@ -20869,7 +21824,7 @@ ${inputText.substring(0, 15000)} ... (截断)
             return;
         }
 
-        const candidate = getDragUrlCandidate(e);
+        const candidate = resolveDroppedUrlCandidate(getDragUrlCandidate(e));
         if (candidate) {
             await createLinkedInputNode(targetNode, candidate, isVideoUrl(candidate));
             return;
@@ -20910,7 +21865,7 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         const payload = getHistoryDragPayload(e);
         if (payload) {
-            const dragUrl = normalizeHistoryVideoUrl(payload.url || payload.originalUrl || payload.mjOriginalUrl || '', payload.type);
+            const dragUrl = resolveDroppedUrlCandidate(resolveHistoryPayloadUrl(payload), payload.type);
             if (dragUrl) {
                 const isVideo = payload.type === 'video' || isVideoUrl(dragUrl);
                 if (isVideo && (targetNode.type === 'gen-image' || targetNode.type === 'image-compare' || targetNode.type === 'gen-video')) {
@@ -20922,7 +21877,7 @@ ${inputText.substring(0, 15000)} ... (截断)
             return;
         }
 
-        const candidate = getDragUrlCandidate(e);
+        const candidate = resolveDroppedUrlCandidate(getDragUrlCandidate(e));
         if (candidate) {
             const isVideo = isVideoUrl(candidate);
             if (isVideo && (targetNode.type === 'gen-image' || targetNode.type === 'image-compare' || targetNode.type === 'gen-video')) {
@@ -28099,13 +29054,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     <button
                                                                         key={modelKey}
                                                                         onClick={() => {
-                                                                            const nextSettings = { model: modelKey };
-                                                                            if (m.id === 'grok-3') {
-                                                                                nextSettings.ratio = '3:2';
-                                                                                nextSettings.duration = '8s';
-                                                                                nextSettings.resolution = '1080P';
+                                                                            applyNodeModelSelection(node.id, node.type, modelKey);
+                                                                            if (m.id === 'grok-3' && node.type === 'gen-video') {
+                                                                                updateNodeSettings(node.id, { duration: '8s' });
                                                                             }
-                                                                            updateNodeSettings(node.id, nextSettings);
                                                                             // V3.4.8: 记住上次使用的模型
                                                                             if (node.type === 'gen-image') {
                                                                                 setLastUsedImageModel(modelKey);
@@ -29500,8 +30452,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     ? resolveHistoryUrl(item, selectedUrl)
                                                                     : resolveHistoryUrl(item);
                                                                 if (displayUrl) {
+                                                                    const lightboxImages = multiImages || getLightboxNavImages(item);
                                                                     setLightboxItem({
                                                                         ...item,
+                                                                        mjImages: lightboxImages || item.mjImages || null,
                                                                         url: displayUrl,
                                                                         selectedMjImageIndex: currentIndex,
                                                                         // V3.7.22: 明确清除 storyboardContext，避免与分镜导航冲突
@@ -29518,9 +30472,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         ? { ...hItem, url: imgUrl, selectedMjImageIndex: idx }
                                                                         : hItem
                                                                 ));
-                                                                const resolvedUrl = resolveHistoryUrl(item, imgUrl);
+                                                                const latestItem = historyMap.get(item.id) || item;
+                                                                const resolvedUrl = resolveHistoryUrl(latestItem, imgUrl);
+                                                                const lightboxImages = getHistoryMultiImages(latestItem) || getLightboxNavImages(latestItem);
                                                                 const updatedItem = {
-                                                                    ...item,
+                                                                    ...latestItem,
+                                                                    mjImages: lightboxImages || latestItem.mjImages || null,
                                                                     url: resolvedUrl,
                                                                     selectedMjImageIndex: idx,
                                                                     // V3.7.22: 明确清除 storyboardContext
@@ -29592,8 +30549,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     ? resolveHistoryUrl(item, selectedUrl)
                                                                     : resolveHistoryUrl(item);
                                                                 if (displayUrl) {
+                                                                    const lightboxImages = multiImages || getLightboxNavImages(item);
                                                                     setLightboxItem({
                                                                         ...item,
+                                                                        mjImages: lightboxImages || item.mjImages || null,
                                                                         url: displayUrl,
                                                                         selectedMjImageIndex: currentIndex,
                                                                         // V3.7.22: 明确清除 storyboardContext
@@ -29610,9 +30569,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         ? { ...hItem, url: imgUrl, selectedMjImageIndex: idx }
                                                                         : hItem
                                                                 ));
-                                                                const resolvedUrl = resolveHistoryUrl(item, imgUrl);
+                                                                const latestItem = historyMap.get(item.id) || item;
+                                                                const resolvedUrl = resolveHistoryUrl(latestItem, imgUrl);
+                                                                const lightboxImages = getHistoryMultiImages(latestItem) || getLightboxNavImages(latestItem);
                                                                 const updatedItem = {
-                                                                    ...item,
+                                                                    ...latestItem,
+                                                                    mjImages: lightboxImages || latestItem.mjImages || null,
                                                                     url: resolvedUrl,
                                                                     selectedMjImageIndex: idx,
                                                                     // V3.7.22: 明确清除 storyboardContext
@@ -30943,7 +31905,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 url: item.url,
                                                 type: item.type || 'image',
                                                 prompt: item.prompt || '',
-                                                mjImages: item.mjImages,
+                                                mjImages: getLightboxNavImages(item),
+                                                output_images: item.output_images,
                                                 selectedMjImageIndex: item.selectedMjImageIndex || 0
                                             });
                                         }
@@ -31077,10 +32040,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                             onNavigate={(newIndex) => {
                                 // V3.7.22: 使用 ref 获取最新的 lightboxItem，避免闭包过时
                                 const currentItem = lightboxItemRef.current;
-                                if (currentItem && currentItem.mjImages && currentItem.mjImages.length > newIndex && newIndex >= 0) {
+                                const currentImages = getHistoryMultiImages(currentItem) || getLightboxNavImages(currentItem);
+                                if (currentItem && currentImages && currentImages.length > newIndex && newIndex >= 0) {
                                     // 确保newIndex在有效范围内
-                                    const validIndex = Math.max(0, Math.min(newIndex, currentItem.mjImages.length - 1));
-                                    const selectedUrl = currentItem.mjImages[validIndex];
+                                    const validIndex = Math.max(0, Math.min(newIndex, currentImages.length - 1));
+                                    const selectedUrl = currentImages[validIndex];
                                     const resolvedUrl = resolveHistoryUrl(currentItem, selectedUrl);
 
                                     // V3.7.22: 只有历史记录项（有 id 字段且无 storyboardContext）才更新历史记录
@@ -31095,6 +32059,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     // 更新lightboxItem显示，保持 storyboardContext 状态
                                     setLightboxItem({
                                         ...currentItem,
+                                        mjImages: currentImages,
                                         url: resolvedUrl,
                                         selectedMjImageIndex: validIndex
                                     });
@@ -31142,44 +32107,100 @@ ${inputText.substring(0, 15000)} ... (截断)
                             onHistoryNavigate={(direction) => {
                                 // V3.7.29: 历史项导航功能 (direction: -1=上一项, 1=下一项)
                                 const currentItem = lightboxItemRef.current;
-                                if (!currentItem || currentItem.storyboardContext) return; // 分镜模式不使用历史导航
+                                const debugNav = (stage, extra = {}) => {
+                                    console.log('[Lightbox][history_nav]', {
+                                        stage,
+                                        direction,
+                                        currentId: currentItem?.id || null,
+                                        ...extra
+                                    });
+                                };
+                                if (!currentItem || currentItem.storyboardContext) {
+                                    debugNav('blocked', { reason: !currentItem ? 'no_current_item' : 'storyboard_context' });
+                                    return; // 分镜模式不使用历史导航
+                                }
 
                                 const snapshotIds = lightboxHistorySnapshotRef.current;
-                                let items = snapshotIds && snapshotIds.length > 0
+                                const baseItems = historyNavItems;
+                                let items = snapshotIds && snapshotIds.length > 1
                                     ? snapshotIds.map(id => historyMap.get(id)).filter(Boolean)
-                                    : historyNavItems;
-                                if (!items.length) return;
+                                    : baseItems;
+                                if (!items.length || items.length <= 1) {
+                                    items = baseItems;
+                                }
+                                if (!items.length) {
+                                    debugNav('blocked', { reason: 'no_items', snapshotCount: snapshotIds?.length || 0, baseCount: baseItems.length });
+                                    return;
+                                }
 
                                 let currentIndex = getHistoryNavAnchorIndex(currentItem, items);
-                                if (currentIndex === -1) return;
+                                if (currentIndex === -1) {
+                                    items = baseItems;
+                                    currentIndex = getHistoryNavAnchorIndex(currentItem, items);
+                                }
+                                if (currentIndex === -1) {
+                                    debugNav('blocked', { reason: 'anchor_not_found', itemCount: items.length, snapshotCount: snapshotIds?.length || 0 });
+                                    return;
+                                }
                                 if (!snapshotIds || snapshotIds.length === 0) {
                                     lightboxHistorySnapshotRef.current = items.map(h => h.id);
                                 }
 
-                                const step = direction < 0 ? -1 : 1;
-                                let nextIndex = currentIndex;
-                                let candidate = null;
-                                let resolvedUrl = '';
-                                let selectedIndex = 0;
-                                for (let i = 0; i < items.length; i++) {
-                                    nextIndex += step;
-                                    if (nextIndex < 0 || nextIndex >= items.length) return;
-                                    const nextItem = items[nextIndex];
-                                    if (!nextItem) continue;
-                                    const preview = getHistoryNavPreview(nextItem);
-                                    if (!preview.url) continue;
-                                    candidate = nextItem;
-                                    resolvedUrl = preview.url;
-                                    selectedIndex = preview.index;
-                                    break;
+                                let nextIndex = findHistoryNavIndex(items, currentIndex, direction);
+                                if (nextIndex < 0 && items !== baseItems) {
+                                    items = baseItems;
+                                    currentIndex = getHistoryNavAnchorIndex(currentItem, items);
+                                    if (currentIndex < 0) {
+                                        debugNav('blocked', { reason: 'fallback_anchor_not_found', baseCount: baseItems.length });
+                                        return;
+                                    }
+                                    nextIndex = findHistoryNavIndex(items, currentIndex, direction);
                                 }
-                                if (!candidate || candidate.id === currentItem.id) return;
+                                if (nextIndex < 0) {
+                                    debugNav('blocked', { reason: 'next_index_not_found', currentIndex, itemCount: items.length });
+                                    return;
+                                }
+                                let candidate = items[nextIndex];
+                                if (candidate?.id === currentItem.id) {
+                                    const retryIndex = findHistoryNavIndex(items, nextIndex, direction);
+                                    if (retryIndex < 0) {
+                                        debugNav('blocked', { reason: 'retry_index_not_found', nextIndex, itemCount: items.length });
+                                        return;
+                                    }
+                                    nextIndex = retryIndex;
+                                    candidate = items[nextIndex];
+                                }
+                                if (!candidate) {
+                                    debugNav('blocked', { reason: 'candidate_missing', nextIndex });
+                                    return;
+                                }
+                                // 纵向切组时强制落在组内第 1 张，避免跨组索引污染导致跳图
+                                const preview = getHistoryNavPreview(candidate, { forceFirstImage: true });
+                                const resolvedUrl = preview.url;
+                                const selectedIndex = preview.index;
+                                if (!candidate || candidate.id === currentItem.id) {
+                                    debugNav('blocked', { reason: 'candidate_same_as_current', candidateId: candidate?.id || null });
+                                    return;
+                                }
+                                if (!resolvedUrl) {
+                                    debugNav('blocked', { reason: 'empty_preview_url', candidateId: candidate.id, selectedIndex });
+                                    return;
+                                }
 
                                 lightboxHistoryIndexRef.current = nextIndex;
                                 setHistoryFocusId(candidate.id);
                                 setHistoryFocusIndex(nextIndex);
+                                const candidateImages = getHistoryMultiImages(candidate) || getLightboxNavImages(candidate);
+                                debugNav('navigate', {
+                                    fromIndex: currentIndex,
+                                    toIndex: nextIndex,
+                                    candidateId: candidate.id,
+                                    itemCount: items.length,
+                                    snapshotCount: snapshotIds?.length || 0
+                                });
                                 setLightboxItem({
                                     ...candidate,
+                                    mjImages: candidateImages || candidate.mjImages || null,
                                     url: resolvedUrl,
                                     selectedMjImageIndex: selectedIndex,
                                     storyboardContext: null
@@ -31527,6 +32548,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             videoResolutionNotesEnabled: !!entry.videoResolutionNotesEnabled,
                                                                             supportsFirstLastFrame: !!entry.supportsFirstLastFrame,
                                                                             supportsHD: !!entry.supportsHD,
+                                                                            omitRatioOnSubmit: !!entry.omitRatioOnSubmit,
+                                                                            omitResolutionOnSubmit: !!entry.omitResolutionOnSubmit,
                                                                             customParams: normalizeCustomParams(entry.customParams),
                                                                             asyncConfig: entry.asyncConfig && typeof entry.asyncConfig === 'object' ? entry.asyncConfig : null,
                                                                             previewOverrideEnabled: !!entry.previewOverrideEnabled,
@@ -32333,6 +33356,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             </div>
 
                                                             {isImageModelType(entry.type) && (
+                                                                <>
                                                                 <div className="grid grid-cols-12 gap-2">
                                                                     <div className="col-span-6">
                                                                         <TagListEditor
@@ -32470,6 +33494,27 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         )}
                                                                     </div>
                                                                 </div>
+                                                                <div className="mt-2 flex items-center gap-4">
+                                                                    <label className={`flex items-center gap-1 text-[10px] ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={!!entry.omitRatioOnSubmit}
+                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { omitRatioOnSubmit: e.target.checked })}
+                                                                            disabled={!isEditing}
+                                                                        />
+                                                                        <span>{t('提交时不注入比例')}</span>
+                                                                    </label>
+                                                                    <label className={`flex items-center gap-1 text-[10px] ${theme === 'dark' ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={!!entry.omitResolutionOnSubmit}
+                                                                            onChange={(e) => updateModelLibraryEntry(entry.id, { omitResolutionOnSubmit: e.target.checked })}
+                                                                            disabled={!isEditing}
+                                                                        />
+                                                                        <span>{t('提交时不注入分辨率')}</span>
+                                                                    </label>
+                                                                </div>
+                                                                </>
                                                             )}
 
                                                             {entry.type === 'Video' && (
@@ -32727,6 +33772,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                     const paramValues = Array.isArray(param.values) ? param.values : [];
                                                                                     const paramNotes = param.valueNotes || {};
                                                                                     const notesEnabled = !!param.notesEnabled;
+                                                                                    const paramDefaultValue = typeof param.defaultValue === 'string' ? param.defaultValue : '';
                                                                                     return (
                                                                                         <>
                                                                                 <div className="flex items-center gap-2">
@@ -32766,7 +33812,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         Object.keys(nextNotes).forEach((key) => {
                                                                                             if (!values.includes(key)) delete nextNotes[key];
                                                                                         });
-                                                                                        updateModelLibraryCustomParam(entry.id, param.id, { values, valueNotes: nextNotes });
+                                                                                        const nextUpdates = { values, valueNotes: nextNotes };
+                                                                                        if (paramDefaultValue && values.length > 0 && !values.includes(paramDefaultValue)) {
+                                                                                            nextUpdates.defaultValue = '';
+                                                                                        }
+                                                                                        updateModelLibraryCustomParam(entry.id, param.id, nextUpdates);
                                                                                     }}
                                                                                     placeholder={t('例：1024x1024,2K,low,high')}
                                                                                     disabled={!isEditing}
@@ -32774,6 +33824,36 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                     formatItem={(value) => getCustomParamValueLabel(param, value)}
                                                                                     maxItems={MAX_CUSTOM_PARAM_VALUES}
                                                                                 />
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`text-[9px] min-w-[72px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('默认值')}</div>
+                                                                                    {paramValues.length > 0 ? (
+                                                                                        <select
+                                                                                            value={paramDefaultValue}
+                                                                                            onChange={(e) => updateModelLibraryCustomParam(entry.id, param.id, { defaultValue: e.target.value })}
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900'
+                                                                                                }`}
+                                                                                        >
+                                                                                            <option value="">{t('不设置')}</option>
+                                                                                            {paramValues.map((value) => (
+                                                                                                <option key={value} value={value}>{getCustomParamValueLabel(param, value)}</option>
+                                                                                            ))}
+                                                                                        </select>
+                                                                                    ) : (
+                                                                                        <input
+                                                                                            value={paramDefaultValue}
+                                                                                            onChange={(e) => updateModelLibraryCustomParam(entry.id, param.id, { defaultValue: e.target.value })}
+                                                                                            placeholder={t('不设置')}
+                                                                                            disabled={!isEditing}
+                                                                                            className={`flex-1 text-[10px] rounded px-2 py-1 border outline-none ${theme === 'dark'
+                                                                                                ? 'bg-zinc-900 border-zinc-800 text-zinc-300 placeholder-zinc-600'
+                                                                                                : 'bg-white border-zinc-300 text-zinc-900 placeholder-zinc-400'
+                                                                                                }`}
+                                                                                        />
+                                                                                    )}
+                                                                                </div>
                                                                                 {paramValues.length > 0 && (
                                                                                     <div className="space-y-1">
                                                                                         <div className="flex items-center gap-2">
@@ -33757,6 +34837,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         // 准备要显示的item，确保包含正确的url和selectedMjImageIndex
                                                                         const displayItem = {
                                                                             ...item,
+                                                                            mjImages: previewImages || getLightboxNavImages(item),
                                                                             url: resolvedDisplayUrl,
                                                                             selectedMjImageIndex: previewImages && previewImages.length > 1
                                                                                 ? safeIndex
@@ -33819,7 +34900,12 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                     onDoubleClick={(e) => {
                                                                                         e.preventDefault();
                                                                                         e.stopPropagation();
-                                                                                        setLightboxItem({ ...item, url: img, selectedMjImageIndex: idx });
+                                                                                        setLightboxItem({
+                                                                                            ...item,
+                                                                                            mjImages: previewImages || getLightboxNavImages(item),
+                                                                                            url: img,
+                                                                                            selectedMjImageIndex: idx
+                                                                                        });
                                                                                     }}
                                                                                 >
                                                                                     <LazyBase64Image
