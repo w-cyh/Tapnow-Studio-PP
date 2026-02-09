@@ -33,6 +33,8 @@ python tapnow-server-full.py
 若希望通过容器运行本地接收器，请参考：
 * `localserver/Docker_README.md`
 
+> 当前 compose 方案可同时启动前端（`http://127.0.0.1:8080`）和本地接收器（`http://127.0.0.1:9527`）。
+
 ### 配置文件作用（tapnow-local-config.json）
 该配置文件决定本地接收器的核心行为：
 * **allowed_roots**：允许读写/保存的根目录白名单。

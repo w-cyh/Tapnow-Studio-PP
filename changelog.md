@@ -5,8 +5,9 @@
 #### 2026-02-10 维护改动（3.8.6 文档/部署）
 - **[修复]** Docker 健康检查地址由 `/` 调整为 `/ping`，避免容器被误判为 unhealthy。
 - **[修复]** Docker 启动参数固定为 `python tapnow-server-full.py -d /app/data`，与 compose 数据卷持久化目录对齐。
-- **[文档]** 新增 `localserver/Docker_README.md`（启动、健康检查、数据持久化、配置挂载、排错）。
-- **[文档]** `README.md` 与 `localserver/LocalServer_README.md` 增加 Docker 部署入口，避免使用路径分散。
+- **[新增]** Docker 前后端双容器部署：`docker-compose.yml` 新增 `web` 服务（`8080`）并保留 `tapnow` 服务（`9527`）。
+- **[新增]** 前端容器构建链路：新增 `Dockerfile.web` + `docker/nginx/default.conf`，用于托管 `dist` 并支持 SPA fallback。
+- **[文档]** 新增/更新 Docker 文档：`localserver/Docker_README.md`、`README.md`、`localserver/LocalServer_README.md`。
 
 #### 2026-02-09 已验证（3.8.6）
 - **[版本]** 正式发布 `3.8.6`，收敛并验收 `rc0` 至 `rc10` 的核心改动。

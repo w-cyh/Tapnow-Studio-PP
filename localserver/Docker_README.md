@@ -1,9 +1,11 @@
 # Tapnow Local Server Docker 部署说明
 
 ## 适用范围
-- 本文档仅针对本地接收器服务 `localserver/tapnow-server-full.py` 的容器化部署。
-- 容器默认暴露 `9527` 端口，提供 `/ping`、`/status`、`/proxy`、`/file/*` 等接口。
-- 该容器不负责托管完整前端应用访问入口，主要用于本地缓存/代理/ComfyUI 中间件。
+- 本文档覆盖当前仓库的 Docker 双容器部署：
+  - `tapnow`：本地接收器服务（`9527`）
+  - `web`：前端静态页面（`8080`）
+- `tapnow` 提供 `/ping`、`/status`、`/proxy`、`/file/*` 等接口。
+- `web` 容器由 Nginx 托管 `dist` 构建产物。
 
 ## 前置条件
 - 已安装 Docker / Docker Compose（Compose V2）。
@@ -27,11 +29,17 @@ docker compose logs -f
 docker compose down
 ```
 
+启动后访问：
+- 前端页面：`http://127.0.0.1:8080`
+- 本地接收器：`http://127.0.0.1:9527`
+
 ## 健康检查
-- 容器健康检查使用 `http://localhost:9527/ping`。
+- `tapnow` 容器健康检查使用 `http://localhost:9527/ping`。
+- `web` 容器健康检查使用 `http://localhost/`。
 - 手动检查：
 
 ```bash
+curl http://127.0.0.1:8080/
 curl http://127.0.0.1:9527/ping
 curl http://127.0.0.1:9527/status
 ```
@@ -70,7 +78,9 @@ docker compose up -d --build
 
 2. 宿主机无法访问  
 原因：端口映射冲突。  
-处理：修改 `docker-compose.yml` 端口映射，例如 `19527:9527`。
+处理：修改 `docker-compose.yml` 端口映射，例如：
+- 本地接收器改为 `19527:9527`
+- 前端改为 `18080:80`
 
 3. 文件未持久化  
 原因：服务保存目录不在卷路径。  

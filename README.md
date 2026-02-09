@@ -12,7 +12,7 @@
 *   **模型库与请求模板**: 模型能力统一管理，支持请求模板预览/覆盖，便于供应商模型对接。
 *   **模型库说明书**: 统一配置与测试说明见 [**模型库说明**](./model-template-readme.md)。
 *   **本地服务说明书**:  接收器说明见 [**本地服务说明**](./localserver/LocalServer_README.md) 本地 ComfyUI_Proxy参见 [**ComfyUI 代理说明**](./localserver/Middleware_README-ComfyUI.md)
-*   **Docker 部署说明**: 本地接收器容器化部署见 [**Docker_README**](./localserver/Docker_README.md)。
+*   **Docker 部署说明**: 前端 + 本地接收器双容器部署见 [**Docker_README**](./localserver/Docker_README.md)。
 *   **本地 Jimeng-API 7z 一键包**: 解压后运行，Base URL 指向 `http://localhost:5100`，API Key 使用 `sessionid`。
 *   **国际化基础**: 引入 i18n 基础设施，逐步支持中英文切换与文案维护。
 
@@ -201,11 +201,12 @@ Jimeng-API 一键启动包已更新，请使用最新版 7z（或自行 Docker �
 
 <br>
 
-### 方式 3：Docker 运行本地接收器
-如果你希望把本地缓存/代理服务放到容器中运行：
+### 方式 3：Docker 运行前端 + 本地接收器
+如果你希望把前端与本地缓存/代理服务一起放到容器中运行：
 1.  查看 [**Docker 部署文档**](./localserver/Docker_README.md)。
 2.  在仓库根目录执行 `docker compose up -d --build`。
-3.  用 `http://127.0.0.1:9527/ping` 验证服务健康。
+3.  打开 `http://127.0.0.1:8080` 访问前端。
+4.  用 `http://127.0.0.1:9527/ping` 验证本地接收器健康。
 
 <br>
 

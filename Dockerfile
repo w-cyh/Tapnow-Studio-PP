@@ -1,30 +1,11 @@
 # ============================================
-# Tapnow Studio Docker Image
-# 多阶段构建：前端 + Python 本地服务器
-# ============================================
-
-# ============================================
-# Stage 1: 构建前端 (Node.js)
-# ============================================
-FROM node:20-alpine AS frontend-builder
-
-WORKDIR /app
-
-# 复制依赖文件并安装
-COPY package*.json ./
-RUN npm ci --production=false
-
-# 复制源码并构建
-COPY . .
-RUN npm run build
-
-# ============================================
-# Stage 2: Python 运行时
+# Tapnow Local Server Docker Image
+# 仅包含 Python 本地接收器服务（9527）
 # ============================================
 FROM python:3.11-slim
 
 LABEL maintainer="Tapnow Studio"
-LABEL description="Tapnow Studio with Local Server"
+LABEL description="Tapnow Local Server"
 
 WORKDIR /app
 
@@ -34,9 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制服务器代码和配置
 COPY localserver/ ./localserver/
-
-# 复制前端构建产物
-COPY --from=frontend-builder /app/dist ./static/
 
 # 创建数据目录
 RUN mkdir -p /app/data
