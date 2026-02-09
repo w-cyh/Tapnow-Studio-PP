@@ -27,11 +27,13 @@ import http.client
 import queue
 import time
 import uuid
+import mimetypes
 import urllib.request
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote, parse_qs
 from datetime import datetime
 from io import BytesIO
+from email.utils import formatdate
 
 # ==============================================================================
 # SECTION 1: 依赖检查与全局配置
@@ -90,6 +92,12 @@ DEFAULT_PROXY_ALLOWED_HOSTS = [
 ]
 DEFAULT_PROXY_TIMEOUT = 300
 CONFIG_FILENAME = "tapnow-local-config.json"
+LOCAL_FILE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+PROXY_MEDIA_CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=604800"
+MEDIA_FILE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif',
+    '.mp4', '.mov', '.webm', '.avi', '.mkv', '.m4v'
+}
 
 # ComfyUI 特有配置
 COMFY_URL = "http://127.0.0.1:8188"
@@ -332,6 +340,20 @@ def is_image_file(filename):
 def is_video_file(filename):
     ext = os.path.splitext(filename)[1].lower()
     return ext in ['.mp4', '.mov', '.webm', '.avi', '.mkv']
+
+def is_media_content_type(content_type):
+    if not content_type:
+        return False
+    lower = content_type.lower()
+    return lower.startswith('image/') or lower.startswith('video/') or lower.startswith('audio/')
+
+def is_media_path(path):
+    try:
+        clean_path = (path or '').split('?', 1)[0]
+        ext = os.path.splitext(clean_path)[1].lower()
+    except Exception:
+        return False
+    return ext in MEDIA_FILE_EXTENSIONS
 
 def read_json_file(path):
     try:
@@ -1438,18 +1460,42 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
         if not filepath:
             self.send_response(404); self.end_headers(); return
         try:
-            with open(filepath, 'rb') as f:
-                content = f.read()
+            stat = os.stat(filepath)
+            etag = f"\"{int(stat.st_mtime)}-{stat.st_size}\""
+            if_match = self.headers.get('If-None-Match', '')
+            if if_match == etag:
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', LOCAL_FILE_CACHE_CONTROL)
+                self.send_header('Last-Modified', formatdate(stat.st_mtime, usegmt=True))
+                self._send_cors()
+                self.end_headers()
+                return
+            content_type, _ = mimetypes.guess_type(filepath)
+            if not content_type:
+                if filepath.endswith('.png'): content_type = 'image/png'
+                elif filepath.endswith('.jpg') or filepath.endswith('.jpeg'): content_type = 'image/jpeg'
+                elif filepath.endswith('.webp'): content_type = 'image/webp'
+                elif filepath.endswith('.gif'): content_type = 'image/gif'
+                elif filepath.endswith('.mp4'): content_type = 'video/mp4'
+                elif filepath.endswith('.webm'): content_type = 'video/webm'
+                else: content_type = 'application/octet-stream'
             self.send_response(200)
-            if filepath.endswith('.png'): self.send_header('Content-Type', 'image/png')
-            elif filepath.endswith('.jpg') or filepath.endswith('.jpeg'): self.send_header('Content-Type', 'image/jpeg')
-            elif filepath.endswith('.webp'): self.send_header('Content-Type', 'image/webp')
-            elif filepath.endswith('.gif'): self.send_header('Content-Type', 'image/gif')
-            elif filepath.endswith('.mp4'): self.send_header('Content-Type', 'video/mp4')
-            elif filepath.endswith('.webm'): self.send_header('Content-Type', 'video/webm')
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(stat.st_size))
+            self.send_header('ETag', etag)
+            self.send_header('Last-Modified', formatdate(stat.st_mtime, usegmt=True))
+            self.send_header('Cache-Control', LOCAL_FILE_CACHE_CONTROL)
             self._send_cors()
             self.end_headers()
-            self.wfile.write(content)
+            if self.command == 'HEAD':
+                return
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
         except Exception:
@@ -1508,12 +1554,27 @@ class TapnowFullHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            response_headers = resp.getheaders()
+            content_type = ''
+            for header, value in response_headers:
+                if header.lower() == 'content-type':
+                    content_type = value
+                    break
+            should_override_cache = (
+                method in ('GET', 'HEAD')
+                and resp.status in (200, 203, 206)
+                and (is_media_content_type(content_type) or is_media_path(parsed_target.path))
+            )
             self.send_response(resp.status, resp.reason)
-            for header, value in resp.getheaders():
+            for header, value in response_headers:
                 lower = header.lower()
                 if lower in PROXY_SKIP_RESPONSE_HEADERS:
                     continue
+                if should_override_cache and lower in ('cache-control', 'expires', 'pragma'):
+                    continue
                 self.send_header(header, value)
+            if should_override_cache:
+                self.send_header('Cache-Control', PROXY_MEDIA_CACHE_CONTROL)
             self._send_cors()
             self.end_headers()
 
