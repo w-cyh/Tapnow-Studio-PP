@@ -6,6 +6,7 @@ localserver/
   tapnow-server-full.py            # 本地接收器主程序（全功能）
   tapnow-local-config.json         # 本地接收器配置
   LocalServer_README.md            # 本说明
+  Docker_README.md                 # Docker 部署说明
   Middleware_README-ComfyUI.md     # ComfyUI 中间件说明
   comfy-middleware/                # ComfyUI 代理/中间件代码
   workflows/                       # ComfyUI 模板目录（template.json / meta.json）
@@ -27,6 +28,10 @@ localserver/
 python tapnow-server-full.py
 ```
 默认监听端口：**9527**
+
+### Docker 启动
+若希望通过容器运行本地接收器，请参考：
+* `localserver/Docker_README.md`
 
 ### 配置文件作用（tapnow-local-config.json）
 该配置文件决定本地接收器的核心行为：

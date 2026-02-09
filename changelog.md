@@ -2,6 +2,12 @@
 
 本文档记录了 Tapnow Studio 近期的所有关键更新、修复和功能改进。
 
+#### 2026-02-10 维护改动（3.8.6 文档/部署）
+- **[修复]** Docker 健康检查地址由 `/` 调整为 `/ping`，避免容器被误判为 unhealthy。
+- **[修复]** Docker 启动参数固定为 `python tapnow-server-full.py -d /app/data`，与 compose 数据卷持久化目录对齐。
+- **[文档]** 新增 `localserver/Docker_README.md`（启动、健康检查、数据持久化、配置挂载、排错）。
+- **[文档]** `README.md` 与 `localserver/LocalServer_README.md` 增加 Docker 部署入口，避免使用路径分散。
+
 #### 2026-02-09 已验证（3.8.6）
 - **[版本]** 正式发布 `3.8.6`，收敛并验收 `rc0` 至 `rc10` 的核心改动。
 - **[新增]** 多图并发主目标落地：节点支持 `1/2/4/9` 张并发、并发间隔配置、同任务窗口聚合显示。
