@@ -2040,6 +2040,9 @@ const buildEmptyAsyncConfig = () => ({
     outputsUrlField: '',
     errorPath: ''
 });
+const IMAGE_BATCH_MODE_PARALLEL_AGGREGATE = 'parallel_aggregate';
+const IMAGE_BATCH_MODE_STANDARD_BATCH = 'standard_batch';
+const NODE_IO_ENVELOPE_VERSION = '1.0';
 
 const DEFAULT_MODEL_LIBRARY = [
     ...DEFAULT_API_CONFIGS
@@ -2110,8 +2113,6 @@ const normalizeImageRouteMode = (value) => {
     if (mode === 't2i') return 't2i';
     return 'auto';
 };
-const IMAGE_BATCH_MODE_PARALLEL_AGGREGATE = 'parallel_aggregate';
-const IMAGE_BATCH_MODE_STANDARD_BATCH = 'standard_batch';
 const normalizeImageBatchMode = (value) => {
     const mode = String(value || '').trim().toLowerCase();
     if (
@@ -2124,7 +2125,6 @@ const normalizeImageBatchMode = (value) => {
     }
     return IMAGE_BATCH_MODE_PARALLEL_AGGREGATE;
 };
-const NODE_IO_ENVELOPE_VERSION = '1.0';
 const normalizeNodeIOMediaType = (type, url = '') => {
     const raw = String(type || '').trim().toLowerCase();
     if (raw === 'image' || raw === 'video') return raw;
