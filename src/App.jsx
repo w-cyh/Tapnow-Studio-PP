@@ -2056,6 +2056,7 @@ const DEFAULT_MODEL_LIBRARY = [
                 type: config.type || 'Chat',
                 disabled: false,
                 imageRouteMode: 'auto',
+                imageBatchMode: IMAGE_BATCH_MODE_PARALLEL_AGGREGATE,
                 ratioLimits: null,
                 defaultRatio: '',
                 resolutionLimits: null,
@@ -2108,6 +2109,42 @@ const normalizeImageRouteMode = (value) => {
     if (mode === 'edit') return 'edit';
     if (mode === 't2i') return 't2i';
     return 'auto';
+};
+const IMAGE_BATCH_MODE_PARALLEL_AGGREGATE = 'parallel_aggregate';
+const IMAGE_BATCH_MODE_STANDARD_BATCH = 'standard_batch';
+const normalizeImageBatchMode = (value) => {
+    const mode = String(value || '').trim().toLowerCase();
+    if (
+        mode === IMAGE_BATCH_MODE_STANDARD_BATCH
+        || mode === 'standard'
+        || mode === 'batch'
+        || mode === 'standardbatch'
+    ) {
+        return IMAGE_BATCH_MODE_STANDARD_BATCH;
+    }
+    return IMAGE_BATCH_MODE_PARALLEL_AGGREGATE;
+};
+const NODE_IO_ENVELOPE_VERSION = '1.0';
+const normalizeNodeIOMediaType = (type, url = '') => {
+    const raw = String(type || '').trim().toLowerCase();
+    if (raw === 'image' || raw === 'video') return raw;
+    return isVideoUrl(url) ? 'video' : 'image';
+};
+const isNodeIOMediaItemValid = (item) => {
+    if (!item || typeof item !== 'object') return false;
+    const mediaType = normalizeNodeIOMediaType(item.type, item.url);
+    if (!mediaType) return false;
+    const url = String(item.url || '').trim();
+    return !!url;
+};
+const isNodeIOEnvelopeValid = (envelope) => {
+    if (!envelope || typeof envelope !== 'object') return false;
+    if (String(envelope.version || '') !== NODE_IO_ENVELOPE_VERSION) return false;
+    if (!Array.isArray(envelope.text) || !Array.isArray(envelope.media)) return false;
+    if (envelope.text.some((textItem) => typeof textItem !== 'string')) return false;
+    if (envelope.media.some((mediaItem) => !isNodeIOMediaItemValid(mediaItem))) return false;
+    if (!envelope.meta || typeof envelope.meta !== 'object') return false;
+    return true;
 };
 const getAntigravityQualityByResolution = (value) => {
     const normalized = normalizeImageResolution(value);
@@ -2486,7 +2523,7 @@ function getDefaultRequestTemplateForType(type) {
         body = {
             model: '{{modelName}}',
             prompt: '{{prompt}}',
-            n: 1,
+            n: '{{n:number}}',
             size: '{{size}}'
         };
     }
@@ -2618,6 +2655,32 @@ const normalizeImageConcurrency = (value) => {
     const parsed = parseInt(String(value || '').trim(), 10);
     if (!Number.isFinite(parsed)) return 1;
     return Math.max(1, Math.min(parsed, 9));
+};
+const applyImageBatchCountToPayload = (payload, imageCount) => {
+    const safeCount = normalizeImageConcurrency(imageCount);
+    if (safeCount <= 1 || payload === null || payload === undefined) return payload;
+    if (typeof FormData !== 'undefined' && payload instanceof FormData) {
+        payload.set('n', String(safeCount));
+        return payload;
+    }
+    if (typeof payload === 'string') {
+        const trimmed = payload.trim();
+        if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return payload;
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                parsed.n = safeCount;
+                return JSON.stringify(parsed);
+            }
+            return payload;
+        } catch (e) {
+            return payload;
+        }
+    }
+    if (typeof payload === 'object' && !Array.isArray(payload)) {
+        return { ...payload, n: safeCount };
+    }
+    return payload;
 };
 const normalizeImageDispatchIntervalSeconds = (value, fallback = DEFAULT_IMAGE_DISPATCH_INTERVAL_SECONDS) => {
     const parsed = parseFloat(String(value ?? '').trim());
@@ -2828,6 +2891,7 @@ const normalizeModelLibraryEntry = (entry, index = 0) => {
         apiType: entry.apiType || 'openai',
         disabled: !!entry.disabled,
         imageRouteMode: normalizeImageRouteMode(entry.imageRouteMode || entry.antigravityRouteMode),
+        imageBatchMode: normalizeImageBatchMode(entry.imageBatchMode || entry.batchMode || entry.multiImageMode),
         ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
         defaultRatio: normalizedDefaultRatio,
         ratioNotes: normalizeValueNotes(entry.ratioNotes),
@@ -8300,6 +8364,11 @@ function TapnowApp() {
             imageRouteMode: normalizeImageRouteMode(
                 resolvedLibrary ? resolvedLibrary.imageRouteMode : config.imageRouteMode
             ),
+            imageBatchMode: normalizeImageBatchMode(
+                resolvedLibrary
+                    ? resolvedLibrary.imageBatchMode
+                    : (config.imageBatchMode || config.batchMode || config.multiImageMode)
+            ),
             ratioLimits: resolvedLibrary ? resolvedLibrary.ratioLimits : (config.ratioLimits || null),
             defaultRatio: resolvedLibrary ? String(resolvedLibrary.defaultRatio || '').trim() : String(config.defaultRatio || '').trim(),
             ratioNotes: resolvedLibrary ? normalizeValueNotes(resolvedLibrary.ratioNotes) : normalizeValueNotes(config.ratioNotes),
@@ -10331,86 +10400,155 @@ function TapnowApp() {
         }
     };
 
-    // 使用 useMemo 缓存连接图片的计算结果，避免重复计算
-    const connectedImagesCache = useMemo(() => {
-        const cache = new Map(); // nodeId -> { inputType -> images[] }
-        const resolveConnectedUrl = (url) => {
-            if (!url) return url;
-            return resolveAssetChannelUrl(url);
+    const extractNodeIOTextPayload = useCallback((sourceNode) => {
+        if (!sourceNode || typeof sourceNode !== 'object') return [];
+        const settings = sourceNode.settings && typeof sourceNode.settings === 'object' ? sourceNode.settings : {};
+        const texts = [];
+        const pushText = (value) => {
+            if (typeof value !== 'string') return;
+            const trimmed = value.trim();
+            if (!trimmed) return;
+            if (texts.includes(trimmed)) return;
+            texts.push(trimmed);
         };
-        connections.forEach(conn => {
-            const inputType = conn.inputType || 'default';
-            if (!cache.has(conn.to)) {
-                cache.set(conn.to, new Map());
+        if (sourceNode.type === 'text-node') pushText(settings.text);
+        if (sourceNode.type === 'gen-image') pushText(settings.prompt);
+        if (sourceNode.type === 'gen-video') pushText(settings.videoPrompt);
+        if (sourceNode.type === 'novel-input') pushText(settings.content);
+        if (sourceNode.type === 'storyboard-node') {
+            const shots = Array.isArray(settings.shots) ? settings.shots : [];
+            shots.forEach((shot) => {
+                if (!shot || typeof shot !== 'object') return;
+                pushText(shot.prompt);
+                pushText(shot.description);
+                pushText(shot.scene_description);
+            });
+        }
+        const fallbackFields = ['text', 'prompt', 'videoPrompt', 'content', 'description', 'summary'];
+        fallbackFields.forEach((field) => pushText(settings[field]));
+        return texts;
+    }, []);
+
+    const extractNodeIOMediaPayload = useCallback((sourceNode) => {
+        if (!sourceNode || typeof sourceNode !== 'object') return [];
+        const media = [];
+        const addMedia = (url, type = 'image') => {
+            const resolvedUrl = resolveAssetChannelUrl(url);
+            const normalizedUrl = String(resolvedUrl || '').trim();
+            if (!normalizedUrl) return;
+            const normalizedType = normalizeNodeIOMediaType(type, normalizedUrl);
+            if (!normalizedType) return;
+            if (media.some((item) => item.url === normalizedUrl && item.type === normalizedType)) return;
+            media.push({ type: normalizedType, url: normalizedUrl });
+        };
+
+        if (sourceNode.type === 'video-input') {
+            const selectedFrames = Array.isArray(sourceNode.selectedKeyframes) && sourceNode.selectedKeyframes.length > 0
+                ? sourceNode.selectedKeyframes
+                : [];
+            if (selectedFrames.length > 0) {
+                selectedFrames.forEach((frame) => addMedia(frame?.url, 'image'));
+            } else if (Array.isArray(sourceNode.frames) && sourceNode.frames.length > 0) {
+                addMedia(sourceNode.frames?.[0]?.url, 'image');
             }
-            const nodeConnections = cache.get(conn.to);
-            if (!nodeConnections.has(inputType)) {
-                nodeConnections.set(inputType, []);
+        } else if (sourceNode.type === 'input-image' || sourceNode.type === 'gen-image' || sourceNode.type === 'preview') {
+            if (sourceNode.content) {
+                const mediaType = sourceNode.type === 'preview'
+                    ? normalizeNodeIOMediaType(sourceNode.previewType, sourceNode.content)
+                    : 'image';
+                addMedia(sourceNode.content, mediaType);
             }
-            const sourceNode = nodesMap.get(conn.from);
-            if (sourceNode) {
-                let images = [];
-                // 1. video-input: 返回所选关键帧或首帧
-                if (sourceNode.type === 'video-input') {
-                    const selected = (sourceNode.selectedKeyframes && sourceNode.selectedKeyframes.length > 0)
-                        ? sourceNode.selectedKeyframes.map(f => f.url)
-                        : [];
-                    if (selected.length > 0) {
-                        images = selected.map(resolveConnectedUrl);
-                    } else if (sourceNode.frames && sourceNode.frames.length > 0) {
-                        images = [resolveConnectedUrl(sourceNode.frames[0].url)];
+            if (Array.isArray(sourceNode.previewMjImages)) {
+                sourceNode.previewMjImages.forEach((url) => addMedia(url, 'image'));
+            }
+        } else if (sourceNode.type === 'gen-video') {
+            addMedia(sourceNode.content, 'video');
+        } else if (sourceNode.type === 'storyboard-node') {
+            const shots = Array.isArray(sourceNode.settings?.shots) ? sourceNode.settings.shots : [];
+            const mode = normalizeStoryboardMode(sourceNode.settings?.mode);
+            shots.forEach((shot) => {
+                if (!shot?.outputEnabled) return;
+                if (mode === 'image') {
+                    const selectedIndex = shot.selectedImageIndex ?? -1;
+                    if (selectedIndex >= 0 && Array.isArray(shot.output_images) && shot.output_images[selectedIndex]) {
+                        addMedia(shot.output_images[selectedIndex], 'image');
                     }
+                    return;
                 }
-                // 2. input-image / gen-image / preview: 返回 content 或 mjImages
-                else if (sourceNode.type === 'input-image' || sourceNode.type === 'gen-image' || sourceNode.type === 'preview') {
-                    if (sourceNode.content) images.push(resolveConnectedUrl(sourceNode.content));
-                    if (sourceNode.previewMjImages) images.push(...sourceNode.previewMjImages.map(resolveConnectedUrl));
+                if (shot.output_url) {
+                    addMedia(shot.output_url, 'video');
+                } else if (shot.image_url) {
+                    addMedia(shot.image_url, 'image');
                 }
-                // 3. storyboard-node: 返回活跃镜头的结果或参考图
-                // V3.7.12: 只输出 outputEnabled=true 且 selectedImageIndex>=0 的镜头
-                else if (sourceNode.type === 'storyboard-node') {
-                    const shots = sourceNode.settings?.shots || [];
-                    const mode = normalizeStoryboardMode(sourceNode.settings?.mode);
+            });
+        }
+        return media;
+    }, [resolveAssetChannelUrl]);
 
-                    // V3.7.12: 遍历所有允许输出的镜头
-                    shots.forEach(s => {
-                        // V3.7.12: 只处理 outputEnabled=true 的镜头（灰色按钮控制）
-                        if (!s.outputEnabled) {
-                            return;
-                        }
-
-                        // V3.7.12: 图片模式 - 只有选中了图片才输出
-                        if (mode === 'image') {
-                            const idx = s.selectedImageIndex ?? -1; // 使用 ?? 避免 0 被视为 falsy
-                            // 必须选中才输出 (idx >= 0)
-                            if (idx >= 0 && s.output_images && s.output_images.length > 0 && s.output_images[idx]) {
-                                images.push(resolveConnectedUrl(s.output_images[idx]));
-                            } else {
-                            }
-                        }
-                        // 视频模式或回退逻辑
-                        else if (s.output_url) {
-                            images.push(resolveConnectedUrl(s.output_url));
-                        } else if (s.image_url) {
-                            images.push(resolveConnectedUrl(s.image_url));
-                        }
-                    });
-                }
-
-                if (images.length > 0) {
-                    nodeConnections.get(inputType).push(...images);
-                }
+    const buildNodeIOEnvelope = useCallback((sourceNode, targetNodeId, inputType = 'default') => {
+        if (!sourceNode || typeof sourceNode !== 'object') return null;
+        const media = extractNodeIOMediaPayload(sourceNode);
+        const text = extractNodeIOTextPayload(sourceNode);
+        if (media.length === 0 && text.length === 0) return null;
+        const kind = media.length > 0 && text.length > 0
+            ? 'mixed'
+            : (media.length > 0 ? 'media' : 'text');
+        const envelope = {
+            version: NODE_IO_ENVELOPE_VERSION,
+            kind,
+            text,
+            media,
+            meta: {
+                sourceNodeId: sourceNode.id || '',
+                sourceNodeType: sourceNode.type || '',
+                targetNodeId: targetNodeId || '',
+                inputType: inputType || 'default'
             }
+        };
+        return isNodeIOEnvelopeValid(envelope) ? envelope : null;
+    }, [extractNodeIOMediaPayload, extractNodeIOTextPayload]);
+
+    const connectedNodeIOEnvelopeCache = useMemo(() => {
+        const cache = new Map(); // nodeId -> { inputType -> envelopes[] }
+        connections.forEach((conn) => {
+            const sourceNode = nodesMap.get(conn.from);
+            if (!sourceNode) return;
+            const inputType = conn.inputType || 'default';
+            const envelope = buildNodeIOEnvelope(sourceNode, conn.to, inputType);
+            if (!envelope) return;
+            if (!cache.has(conn.to)) cache.set(conn.to, new Map());
+            const perNode = cache.get(conn.to);
+            if (!perNode.has(inputType)) perNode.set(inputType, []);
+            perNode.get(inputType).push(envelope);
         });
         return cache;
         // V3.7.5: 添加 activeShot 为依赖，确保分镜表切换镜头时缓存失效
-    }, [connections, nodesMap, nodes, activeShot, resolveAssetChannelUrl]);
+    }, [connections, nodesMap, nodes, activeShot, buildNodeIOEnvelope]);
 
-    const getConnectedInputImages = useCallback((targetNodeId, inputType = 'default') => {
-        const nodeCache = connectedImagesCache.get(targetNodeId);
+    const getConnectedNodeIOEnvelopes = useCallback((targetNodeId, inputType = 'default') => {
+        const nodeCache = connectedNodeIOEnvelopeCache.get(targetNodeId);
         if (!nodeCache) return [];
         return nodeCache.get(inputType) || [];
-    }, [connectedImagesCache]);
+    }, [connectedNodeIOEnvelopeCache]);
+
+    const getConnectedInputImages = useCallback((targetNodeId, inputType = 'default') => {
+        const envelopes = getConnectedNodeIOEnvelopes(targetNodeId, inputType);
+        const images = [];
+        const pushImage = (url) => {
+            const normalized = String(url || '').trim();
+            if (!normalized) return;
+            if (images.includes(normalized)) return;
+            images.push(normalized);
+        };
+        envelopes.forEach((envelope) => {
+            const mediaItems = Array.isArray(envelope?.media) ? envelope.media : [];
+            mediaItems.forEach((item) => {
+                if (normalizeNodeIOMediaType(item?.type, item?.url) !== 'image') return;
+                pushImage(item?.url);
+            });
+        });
+        return images;
+    }, [getConnectedNodeIOEnvelopes]);
     // 使用 useMemo 缓存 video-input 节点查找结果
     // V3.4.13: 同时支持 input-image 节点（将图片作为单帧处理）
     const connectedVideoInputCache = useMemo(() => {
@@ -10510,17 +10648,20 @@ function TapnowApp() {
     // 功能2：获取连接的文字节点内容
     const getConnectedTextNodes = useCallback((targetNodeId) => {
         const texts = [];
-        connections.forEach(conn => {
-            if (conn.to === targetNodeId) {
-                const sourceNode = nodesMap.get(conn.from);
-                if (sourceNode && sourceNode.type === 'text-node') {
-                    const text = sourceNode.settings?.text || '';
-                    if (text) texts.push(text);
-                }
-            }
+        const pushText = (value) => {
+            if (typeof value !== 'string') return;
+            const trimmed = value.trim();
+            if (!trimmed) return;
+            if (texts.includes(trimmed)) return;
+            texts.push(trimmed);
+        };
+        const envelopes = getConnectedNodeIOEnvelopes(targetNodeId, 'default');
+        envelopes.forEach((envelope) => {
+            if (!Array.isArray(envelope?.text)) return;
+            envelope.text.forEach(pushText);
         });
         return texts;
-    }, [connections, nodesMap]);
+    }, [getConnectedNodeIOEnvelopes]);
 
     // 使用 useMemo 缓存特定输入点的图片URL
     const connectedImageForInputCache = useMemo(() => {
@@ -10655,6 +10796,7 @@ function TapnowApp() {
             type: 'Image',
             disabled: false,
             imageRouteMode: 'auto',
+            imageBatchMode: IMAGE_BATCH_MODE_PARALLEL_AGGREGATE,
             ratioLimits: null,
             defaultRatio: '',
             ratioNotes: {},
@@ -14713,6 +14855,20 @@ function TapnowApp() {
                 fallbackImageConcurrency
             )
             : 1;
+        const requestedImageBatchMode = type === 'image'
+            ? normalizeImageBatchMode(
+                options.imageBatchMode
+                || options.batchMode
+                || resolvedConfig?.imageBatchMode
+                || node?.settings?.imageBatchMode
+            )
+            : IMAGE_BATCH_MODE_PARALLEL_AGGREGATE;
+        const shouldUseStandardBatchMode = type === 'image'
+            && requestedImageConcurrency > 1
+            && requestedImageBatchMode === IMAGE_BATCH_MODE_STANDARD_BATCH;
+        const requestedImageCountForSubmit = shouldUseStandardBatchMode
+            ? requestedImageConcurrency
+            : 1;
         const requestedDispatchIntervalSec = type === 'image'
             ? normalizeImageDispatchIntervalSeconds(
                 options.imageDispatchIntervalSec ?? resolvedConfig?.imageDispatchIntervalSec ?? DEFAULT_IMAGE_DISPATCH_INTERVAL_SECONDS,
@@ -14876,9 +15032,10 @@ function TapnowApp() {
         const now = Date.now();
         const actualSourceNodeId = node?.id || nodeId || null;
         const useProxy = !!credentials.useProxy;
+        const shouldInsertHistoryItem = !options._isRetry && !options._skipHistoryInsert;
 
         // V3.5.31: Skip history creation on retry to prevent duplicate tasks
-        if (!options._isRetry) {
+        if (shouldInsertHistoryItem) {
             setHistory((prev) => [{
                 id: taskId, type, url: '',
                 prompt: prompt || (sourceImage ? `Img2${type === 'image' ? 'Img' : 'Vid'}` : 'Untitled'),
@@ -14895,7 +15052,9 @@ function TapnowApp() {
                 resolution: resolution, // V3.7.26: 保存分辨率
                 duration: type === 'video' ? duration : null,
                 hasInputImages: connectedImages.length > 0, // V3.7.26: 是否有参考图（用于判断文→图还是图→图）
-                customParams: customParamSelections || null
+                customParams: customParamSelections || null,
+                imageBatchMode: type === 'image' ? requestedImageBatchMode : null,
+                requestedImageCount: type === 'image' ? requestedImageConcurrency : 1
             }, ...prev]);
         }
 
@@ -14924,7 +15083,7 @@ function TapnowApp() {
         }
 
         // V3.5.31: Skip opening history panel on retry
-        if (!options._isRetry) {
+        if (shouldInsertHistoryItem) {
             // 优化：延迟打开历史面板，避免与 setHistory 同时触发造成卡顿
             requestAnimationFrame(() => {
                 setTimeout(() => {
@@ -14933,7 +15092,13 @@ function TapnowApp() {
             });
         }
 
-        if (type === 'image' && requestedImageConcurrency > 1 && !options._batchImageDispatched && !options._isRetry) {
+        if (
+            type === 'image'
+            && requestedImageConcurrency > 1
+            && requestedImageBatchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE
+            && !options._batchImageDispatched
+            && !options._isRetry
+        ) {
             imageBatchTaskMapRef.current.set(taskId, {
                 total: requestedImageConcurrency,
                 completed: 0,
@@ -15213,7 +15378,7 @@ function TapnowApp() {
                     payload = {
                         model: modelName,
                         prompt: prompt || '',
-                        n: 1,
+                        n: requestedImageCountForSubmit,
                         size: sizeStr,
                         ...(useAsync ? { async_mode: true } : {})
                     };
@@ -15289,7 +15454,7 @@ function TapnowApp() {
                         const formData = new FormData();
                         formData.append('model', modelName);
                         formData.append('prompt', prompt || 'enhance');
-                        formData.append('n', '1');
+                        formData.append('n', String(requestedImageCountForSubmit));
                         if (antigravitySize) formData.append('size', antigravitySize);
                         if (ratio && ratio !== 'Auto') formData.append('aspect_ratio', ratio);
                         if (antigravityImageSize) formData.append('image_size', antigravityImageSize);
@@ -15309,7 +15474,7 @@ function TapnowApp() {
                         payload = {
                             model: modelName,
                             prompt: prompt || '',
-                            n: 1,
+                            n: requestedImageCountForSubmit,
                             size: antigravitySize,
                             response_format: 'url'
                         };
@@ -15323,7 +15488,7 @@ function TapnowApp() {
                     const formData = new FormData();
                     formData.append('model', config?.modelName || 'nano-banana');
                     formData.append('prompt', prompt || 'enhance');
-                    formData.append('n', '1');
+                    formData.append('n', String(requestedImageCountForSubmit));
                     formData.append('size', sizeStr);
                     if (aspect) formData.append('aspect_ratio', aspect);
                     if (imageSizeFlag) formData.append('image_size', imageSizeFlag);
@@ -15368,7 +15533,7 @@ function TapnowApp() {
                     const jsonBody = {
                         model: config?.modelName || 'gpt-4o-image',
                         prompt: finalPrompt,
-                        n: 1,
+                        n: requestedImageCountForSubmit,
                         size: sizeStr,
                         response_format: 'url'
                     };
@@ -15613,12 +15778,15 @@ function TapnowApp() {
                     payload = {
                         model: config?.modelName || modelId,
                         prompt,
-                        n: 1,
+                        n: requestedImageCountForSubmit,
                         size: sizeStr,
                         response_format: 'url'
                     };
                 }
 
+                if (shouldUseStandardBatchMode && !isMidjourney) {
+                    payload = applyImageBatchCountToPayload(payload, requestedImageCountForSubmit);
+                }
                 payload = applyCustomParamsToPayload(payload, customParams, customParamSelections);
                 if (config?.previewOverrideEnabled && config.previewOverridePatch) {
                     payload = applyPreviewOverridePatch(payload, config.previewOverridePatch);
@@ -15661,7 +15829,10 @@ function TapnowApp() {
                         duration: type === 'video' ? duration : undefined,
                         durationNumber: normalizeDurationValue(duration, 5),
                         seed: node?.settings?.seed,
-                        n: 1,
+                        n: requestedImageCountForSubmit,
+                        imageCount: requestedImageCountForSubmit,
+                        requestedImageCount: requestedImageConcurrency,
+                        imageBatchMode: requestedImageBatchMode,
                         provider: {
                             key: apiKey,
                             baseUrl,
@@ -15717,7 +15888,10 @@ function TapnowApp() {
                             duration: type === 'video' ? duration : undefined,
                             durationNumber: normalizeDurationValue(duration, 5),
                             seed: node?.settings?.seed,
-                            n: 1,
+                            n: requestedImageCountForSubmit,
+                            imageCount: requestedImageCountForSubmit,
+                            requestedImageCount: requestedImageConcurrency,
+                            imageBatchMode: requestedImageBatchMode,
                             provider: {
                                 key: apiKey,
                                 baseUrl,
@@ -15817,6 +15991,15 @@ function TapnowApp() {
                     } catch (e) {
                         console.warn('[RequestTemplate] 构建失败，已回退默认请求:', e);
                         requestOverride = null;
+                    }
+                }
+                if (shouldUseStandardBatchMode && !isMidjourney) {
+                    payload = applyImageBatchCountToPayload(payload, requestedImageCountForSubmit);
+                    if (requestOverride && requestOverride.body !== undefined) {
+                        requestOverride = {
+                            ...requestOverride,
+                            body: applyImageBatchCountToPayload(requestOverride.body, requestedImageCountForSubmit)
+                        };
                     }
                 }
 
@@ -16301,6 +16484,13 @@ function TapnowApp() {
                 if (imageUrls.length === 0) {
                     console.warn('[Image Parse] 图片URL规范化后为空');
                     throw new Error('图片返回结果无效');
+                }
+                if (
+                    shouldUseStandardBatchMode
+                    && !options._standardBatchFallback
+                    && imageUrls.length < requestedImageCountForSubmit
+                ) {
+                    throw new Error(`标准批次返图数量不足: ${imageUrls.length}/${requestedImageCountForSubmit}`);
                 }
 
                 const endTime = Date.now();
@@ -17201,6 +17391,31 @@ function TapnowApp() {
             if (err.shouldRetry) {
                 // V3.5.31: Pass _isRetry and _existingTaskId to prevent duplicate history items
                 return startGeneration(prompt, type, sourceImages, nodeId, { ...options, _isRetry: true, _existingTaskId: taskId });
+            }
+            if (
+                type === 'image'
+                && requestedImageConcurrency > 1
+                && requestedImageBatchMode === IMAGE_BATCH_MODE_STANDARD_BATCH
+                && !options._standardBatchFallback
+            ) {
+                console.warn('[Image Batch] standard_batch failed, fallback to parallel_aggregate', {
+                    taskId,
+                    requestedImageConcurrency,
+                    err: err?.message || err
+                });
+                showToast(`标准批次失败，已回退并发聚合（${requestedImageConcurrency} 张）`, 'warning', 2800);
+                return startGeneration(prompt, type, sourceImages, nodeId, {
+                    ...options,
+                    _isRetry: false,
+                    _skipHistoryInsert: true,
+                    _existingTaskId: taskId,
+                    _standardBatchFallback: true,
+                    _batchImageDispatched: false,
+                    _batchAggregate: false,
+                    imageBatchMode: IMAGE_BATCH_MODE_PARALLEL_AGGREGATE,
+                    imageConcurrency: requestedImageConcurrency,
+                    concurrentImages: requestedImageConcurrency
+                });
             }
 
             console.error('[CONSOLE_ERROR]', err);
@@ -35397,6 +35612,19 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             : 'bg-white border-zinc-300 text-zinc-900'
                                                                             }`}
                                                                     />
+                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('多图模式')}</span>
+                                                                    <select
+                                                                        value={normalizeImageBatchMode(entry.imageBatchMode)}
+                                                                        onChange={(e) => updateModelLibraryEntry(entry.id, { imageBatchMode: normalizeImageBatchMode(e.target.value) })}
+                                                                        disabled={!isEditing}
+                                                                        className={`w-[112px] text-[9px] rounded px-1 py-0.5 border outline-none ${theme === 'dark'
+                                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                                            }`}
+                                                                    >
+                                                                        <option value={IMAGE_BATCH_MODE_PARALLEL_AGGREGATE}>{t('并发聚合')}</option>
+                                                                        <option value={IMAGE_BATCH_MODE_STANDARD_BATCH}>{t('标准批次')}</option>
+                                                                    </select>
                                                                     <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('默认张数')}</span>
                                                                     <select
                                                                         value={normalizeImageConcurrency(entry.defaultImageConcurrency || 1)}

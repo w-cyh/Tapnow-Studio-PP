@@ -204,9 +204,27 @@ Jimeng-API 一键启动包已更新，请使用最新版 7z（或自行 Docker �
 ### 方式 3：Docker 运行前端 + 本地接收器
 如果你希望把前端与本地缓存/代理服务一起放到容器中运行：
 1.  查看 [**Docker 部署文档**](./localserver/Docker_README.md)。
-2.  在仓库根目录执行 `docker compose up -d --build`。
+2.  在仓库根目录执行：
+    ```bash
+    docker compose up -d --build
+    ```
 3.  打开 `http://127.0.0.1:8080` 访问前端。
-4.  用 `http://127.0.0.1:9527/ping` 验证本地接收器健康。
+4.  用下面命令验证服务状态：
+    ```bash
+    curl http://127.0.0.1:8080/
+    curl http://127.0.0.1:9527/ping
+    curl http://127.0.0.1:9527/status
+    ```
+5.  常用运维命令：
+    ```bash
+    docker compose logs -f
+    docker compose down
+    ```
+6.  若端口冲突，可在 `docker-compose.yml` 修改映射（示例：`18080:80`、`19527:9527`）。
+
+当前 Compose 默认包含两个服务：
+- `web`：Nginx 托管前端构建产物（`8080`）
+- `tapnow`：本地接收器（`9527`，支持 `/ping`、`/status`、`/proxy`、`/file/*`）
 
 <br>
 
