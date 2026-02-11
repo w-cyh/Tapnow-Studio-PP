@@ -6,6 +6,7 @@ backups/
 .waylog/
 .githooks/
 tools/
+scripts/
 kanban.json
 codex.md
 *.7z

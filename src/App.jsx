@@ -1982,37 +1982,17 @@ const normalizeShotIdValue = (value) => {
     if (value === null || value === undefined) return '';
     return String(value).trim();
 };
-const extractShotIdMeta = (value) => {
-    const raw = normalizeShotIdValue(value);
-    if (!raw) return { raw: '', token: '', num: null, base: null };
-    const tokenMatch = raw.match(/(\d+(?:\.\d+)?)/);
-    const token = tokenMatch ? tokenMatch[1] : '';
-    let num = Number(raw);
-    if (!Number.isFinite(num) && token) {
-        num = Number(token);
-    }
-    if (!Number.isFinite(num)) num = null;
-    const base = Number.isFinite(num) ? Math.floor(num) : null;
-    return { raw, token, num, base };
-};
-const normalizeShotToken = (token) => {
-    if (!token) return '';
-    const trimmed = String(token).trim();
-    if (!trimmed) return '';
-    if (!trimmed.includes('.')) return trimmed;
-    return trimmed.replace(/\.0+$/, '').replace(/(\.\d*?[1-9])0+$/, '$1');
-};
+const SIMPLE_NUMERIC_SHOT_ID_RE = /^-?\d+(?:\.\d+)?$/;
 const isSameShotId = (a, b) => {
-    const metaA = extractShotIdMeta(a);
-    const metaB = extractShotIdMeta(b);
-    if (!metaA.raw || !metaB.raw) return false;
-    if (metaA.raw === metaB.raw) return true;
-    const tokenA = normalizeShotToken(metaA.token);
-    const tokenB = normalizeShotToken(metaB.token);
-    if (tokenA && tokenB && tokenA === tokenB) return true;
-    if (Number.isFinite(metaA.num) && Number.isFinite(metaB.num)) {
-        if (Math.abs(metaA.num - metaB.num) < 1e-3) return true;
-    }
+    const rawA = normalizeShotIdValue(a);
+    const rawB = normalizeShotIdValue(b);
+    if (!rawA || !rawB) return false;
+    if (rawA === rawB) return true;
+    if (!SIMPLE_NUMERIC_SHOT_ID_RE.test(rawA) || !SIMPLE_NUMERIC_SHOT_ID_RE.test(rawB)) return false;
+    const numA = Number(rawA);
+    const numB = Number(rawB);
+    if (!Number.isFinite(numA) || !Number.isFinite(numB)) return false;
+    if (Math.abs(numA - numB) < 1e-6) return true;
     return false;
 };
 const MAX_STORYBOARD_OUTPUT_HISTORY = 20;
@@ -30167,7 +30147,19 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                     </div>
                                                                                                 )}
                                                                                                 {/* 删除按钮 */}
-                                                                                                <button onClick={(e) => { e.stopPropagation(); updateShot(node.id, shot.id, { image_url: '', image_filename: '', referenceImages: [] }); }} className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity z-30" title={t('删除')}><X size={12} /></button>
+                                                                                                <button
+                                                                                                    onClick={(e) => {
+                                                                                                        e.stopPropagation();
+                                                                                                        const nextRefs = inputImages.slice(1);
+                                                                                                        updateShot(node.id, shot.id, nextRefs.length > 0
+                                                                                                            ? { referenceImages: nextRefs, image_url: nextRefs[0] || '', image_filename: '' }
+                                                                                                            : { image_url: '', image_filename: '', referenceImages: [] });
+                                                                                                    }}
+                                                                                                    className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity z-30"
+                                                                                                    title={t('删除')}
+                                                                                                >
+                                                                                                    <X size={12} />
+                                                                                                </button>
                                                                                             </>
                                                                                         ) : (
                                                                                             <div className="flex flex-col items-center gap-1 text-zinc-500">
@@ -30182,7 +30174,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                 if (f) {
                                                                                                     const r = new FileReader();
                                                                                                     r.onload = (v) => {
-                                                                                                        updateShot(node.id, shot.id, { image_url: v.target.result, image_filename: f.name });
+                                                                                                        const uploadedUrl = v.target.result;
+                                                                                                        if (showMultiRef || inputImages.length > 1 || (Array.isArray(shot.referenceImages) && shot.referenceImages.length > 0)) {
+                                                                                                            const nextRefs = inputImages.length > 0 ? [...inputImages] : [];
+                                                                                                            if (nextRefs.length === 0) {
+                                                                                                                nextRefs.push(uploadedUrl);
+                                                                                                            } else {
+                                                                                                                nextRefs[0] = uploadedUrl;
+                                                                                                            }
+                                                                                                            updateShot(node.id, shot.id, { referenceImages: nextRefs.slice(0, 5), image_url: nextRefs[0] || uploadedUrl, image_filename: f.name });
+                                                                                                            return;
+                                                                                                        }
+                                                                                                        updateShot(node.id, shot.id, { image_url: uploadedUrl, image_filename: f.name, referenceImages: [] });
                                                                                                     };
                                                                                                     r.readAsDataURL(f);
                                                                                                 }
@@ -30205,7 +30208,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             {inputImages.slice(1).map((img, idx) => (
                                                                                                 <div
                                                                                                     key={idx + 1}
-                                                                                                    className={`relative w-12 h-14 shrink-0 rounded border overflow-hidden cursor-pointer hover:border-blue-500 transition-all ${borderColor} ${bgColor}`}
+                                                                                                    className={`group/ref-thumb relative w-12 h-14 shrink-0 rounded border overflow-hidden cursor-pointer hover:border-blue-500 transition-all ${borderColor} ${bgColor}`}
                                                                                                     onClick={(e) => {
                                                                                                         e.stopPropagation();
                                                                                                         // 点击缩略图切换为主图
@@ -30214,9 +30217,37 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                         [newRefs[0], newRefs[clickedIdx]] = [newRefs[clickedIdx], newRefs[0]];
                                                                                                         updateShot(node.id, shot.id, { referenceImages: newRefs, image_url: newRefs[0] });
                                                                                                     }}
+                                                                                                    onDoubleClick={(e) => {
+                                                                                                        e.stopPropagation();
+                                                                                                        setLightboxItem({ url: img, type: 'image' });
+                                                                                                    }}
                                                                                                 >
                                                                                                     <LazyBase64Image src={img} className="w-full h-full object-cover" />
                                                                                                     <div className="absolute top-0 left-0 bg-black/50 text-white text-[8px] px-1 backdrop-blur-sm">{idx + 2}</div>
+                                                                                                    <button
+                                                                                                        onClick={(e) => { e.stopPropagation(); setLightboxItem({ url: img, type: 'image' }); }}
+                                                                                                        className="absolute bottom-1 left-1 p-1 rounded-full bg-black/60 text-white hover:bg-blue-500 opacity-0 group-hover/ref-thumb:opacity-100 transition-opacity z-30"
+                                                                                                        title={t('预览原图')}
+                                                                                                    >
+                                                                                                        <Maximize2 size={8} />
+                                                                                                    </button>
+                                                                                                    <button
+                                                                                                        onClick={(e) => {
+                                                                                                            e.stopPropagation();
+                                                                                                            const removeIdx = idx + 1;
+                                                                                                            const newRefs = [...inputImages];
+                                                                                                            newRefs.splice(removeIdx, 1);
+                                                                                                            updateShot(node.id, shot.id, {
+                                                                                                                referenceImages: newRefs,
+                                                                                                                image_url: newRefs[0] || '',
+                                                                                                                image_filename: newRefs.length > 0 ? shot.image_filename : ''
+                                                                                                            });
+                                                                                                        }}
+                                                                                                        className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-red-500 opacity-0 group-hover/ref-thumb:opacity-100 transition-opacity z-30"
+                                                                                                        title={t('删除')}
+                                                                                                    >
+                                                                                                        <X size={8} />
+                                                                                                    </button>
                                                                                                 </div>
                                                                                             ))}
                                                                                             {inputImages.length < 5 && (
@@ -30227,7 +30258,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                         if (f) {
                                                                                                             const r = new FileReader();
                                                                                                             r.onload = (v) => {
-                                                                                                                updateShot(node.id, shot.id, { referenceImages: [...inputImages, v.target.result] });
+                                                                                                                const nextRefs = [...inputImages, v.target.result].slice(0, 5);
+                                                                                                                updateShot(node.id, shot.id, { referenceImages: nextRefs, image_url: nextRefs[0] || '' });
                                                                                                             };
                                                                                                             r.readAsDataURL(f);
                                                                                                         }
