@@ -29,6 +29,10 @@ python tapnow-server-full.py
 ```
 默认监听端口：**9527**
 
+若使用仓库内置即梦一键包，请使用当前版本：
+- `JimengAPI_Release_Green_260211_v1.9.1.7z`（Windows）
+- `JimengAPI_For_Mac_Users_260211_v1.9.1.7z`（macOS）
+
 ### Docker 启动
 若希望通过容器运行本地接收器，请参考：
 * `localserver/Docker_README.md`

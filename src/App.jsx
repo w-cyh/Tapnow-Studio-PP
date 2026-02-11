@@ -590,9 +590,11 @@ const HistoryMjImageCell = memo(({
     language
 }) => {
     const [isLoaded, setIsLoaded] = useState(false);
+    const [loadFailed, setLoadFailed] = useState(false);
 
     useEffect(() => {
         setIsLoaded(false);
+        setLoadFailed(false);
     }, [displayImgUrl]);
 
     const isActive = item.selectedMjImageIndex === idx && lightboxItem && lightboxItem.id === item.id;
@@ -618,9 +620,13 @@ const HistoryMjImageCell = memo(({
                 loading="lazy"
                 className="w-full h-full object-contain"
                 alt=""
-                onLoad={() => setIsLoaded(true)}
+                onLoad={() => {
+                    setIsLoaded(true);
+                    setLoadFailed(false);
+                }}
                 onError={(e) => {
                     setIsLoaded(false);
+                    setLoadFailed(true);
                     console.error(`图片 ${idx + 1} 加载失败`);
                     onCacheMissing && onCacheMissing(item.id, displayImgUrl);
                     e.target.style.display = 'none';
@@ -628,10 +634,10 @@ const HistoryMjImageCell = memo(({
             />
             {!isLoaded && (
                 <div
-                    className={`absolute inset-0 flex items-center justify-center text-[12px] ${placeholderClass} pointer-events-none select-none`}
+                    className={`absolute inset-0 flex items-center justify-center text-[12px] ${loadFailed ? 'text-red-400' : placeholderClass} pointer-events-none select-none`}
                     style={{ fontFamily: '"Microsoft YaHei","微软雅黑","KaiTi","楷体",serif' }}
                 >
-                    {t('图片')}{idx + 1}
+                    {loadFailed ? t('加载失败') : `${t('图片')}${idx + 1}`}
                 </div>
             )}
             {isActive && (
@@ -957,6 +963,36 @@ const HistoryItem = memo(({
     const resolutionLabel = historyMeta?.resolutionLabel ?? (item.resolution || (item.width && item.height ? `${item.width}x${item.height}` : null));
     const durationLabel = historyMeta?.durationLabel ?? ((item.type === 'video' && item.duration) ? `${item.duration}s` : null);
     const customParamLabels = historyMeta?.customParamLabels || [];
+    const singleImageDisplayUrl = getResolvedDisplayUrl(item.url || item.originalUrl || item.mjOriginalUrl);
+    const singleVideoDisplayUrl = videoSrc || item.url || item.originalUrl || item.mjOriginalUrl || '';
+    const singlePreviewKey = item.type === 'video' ? singleVideoDisplayUrl : singleImageDisplayUrl;
+    const [singlePreviewLoading, setSinglePreviewLoading] = useState(item.status === 'completed');
+    const [singlePreviewFailed, setSinglePreviewFailed] = useState(false);
+    useEffect(() => {
+        setSinglePreviewLoading(item.status === 'completed');
+        setSinglePreviewFailed(false);
+    }, [item.id, item.type, item.status, singlePreviewKey]);
+    const throttleStats = item?.throttleStats && typeof item.throttleStats === 'object' ? item.throttleStats : null;
+    const throttleInfo = useMemo(() => {
+        if (!throttleStats) return '';
+        const info = [];
+        const batchMode = String(throttleStats.imageBatchMode || '').trim();
+        if (batchMode === IMAGE_BATCH_MODE_STANDARD_BATCH) info.push('标准批次');
+        if (batchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE) info.push('并发聚合');
+        const requested = Number(throttleStats.requestedImageCount || 0);
+        if (requested > 1) info.push(`${requested}张`);
+        const interval = Number(throttleStats.dispatchIntervalSec || 0);
+        if (interval > 0) info.push(`间隔${interval}s`);
+        const retries = Number(throttleStats.retryCount || 0);
+        if (retries > 0) info.push(`重试×${retries}`);
+        const count429 = Number(throttleStats.http429Count || 0);
+        if (count429 > 0) info.push(`429×${count429}`);
+        const timeoutCount = Number(throttleStats.timeoutCount || 0);
+        if (timeoutCount > 0) info.push(`超时×${timeoutCount}`);
+        if (throttleStats.fallbackToParallel) info.push('已回退并发');
+        return info.join(' · ');
+    }, [throttleStats]);
+    const hasThrottleWarning = !!(throttleStats && (Number(throttleStats.http429Count || 0) > 0 || Number(throttleStats.timeoutCount || 0) > 0));
 
     return (
         <div
@@ -1052,15 +1088,21 @@ const HistoryItem = memo(({
                     ) : (
                         item.type === 'image' ? (
                             <LazyBase64Image
-                                src={getResolvedDisplayUrl(item.url || item.originalUrl || item.mjOriginalUrl)}
+                                src={singleImageDisplayUrl}
                                 loading="lazy"
                                 className="w-full h-full object-cover"
                                 alt={item.prompt || '生成的图片'}
+                                onLoad={() => {
+                                    setSinglePreviewLoading(false);
+                                    setSinglePreviewFailed(false);
+                                }}
                                 onError={(e) => {
                                     const rawUrl = item.url || item.originalUrl || item.mjOriginalUrl;
                                     const resolvedUrl = getResolvedDisplayUrl(rawUrl);
                                     console.error('图片加载失败:', resolvedUrl || rawUrl);
                                     onCacheMissing && onCacheMissing(item.id, resolvedUrl || rawUrl);
+                                    setSinglePreviewLoading(false);
+                                    setSinglePreviewFailed(true);
                                     e.target.style.display = 'none';
                                 }}
                             />
@@ -1070,19 +1112,31 @@ const HistoryItem = memo(({
                                 // 简单处理：直接显示视频，后续可优化
                                 return (
                                     <ResolvedVideo
-                                        src={videoSrc || item.url || item.originalUrl}
+                                        src={singleVideoDisplayUrl}
                                         className="w-full h-full object-cover"
                                         muted
                                         loop
                                         playsInline
                                         preload="metadata"
+                                        onLoadedMetadata={() => {
+                                            setSinglePreviewLoading(false);
+                                            setSinglePreviewFailed(false);
+                                        }}
+                                        onCanPlay={() => {
+                                            setSinglePreviewLoading(false);
+                                            setSinglePreviewFailed(false);
+                                        }}
                                         onError={() => {
                                             const fallback = item.url || item.originalUrl || item.mjOriginalUrl;
                                             if (hasLocalCache && fallback && videoSrc === localCacheFallback) {
+                                                setSinglePreviewLoading(true);
+                                                setSinglePreviewFailed(false);
                                                 setVideoSrc(fallback);
                                                 onCacheMissing && onCacheMissing(item.id, localCacheFallback);
                                             } else {
                                                 console.error('视频加载失败:', fallback);
+                                                setSinglePreviewLoading(false);
+                                                setSinglePreviewFailed(true);
                                             }
                                         }}
                                     />
@@ -1093,6 +1147,16 @@ const HistoryItem = memo(({
                 ) : (
                     <div className="w-full h-full flex items-center justify-center">
                         <Loader2 className="animate-spin text-zinc-600" />
+                    </div>
+                )}
+                {item.status === 'completed' && (!multiImages || multiImages.length <= 1) && singlePreviewLoading && !singlePreviewFailed && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/35 text-white/80 text-[10px] pointer-events-none">
+                        {t('预览加载中...')}
+                    </div>
+                )}
+                {item.status === 'completed' && (!multiImages || multiImages.length <= 1) && singlePreviewFailed && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/45 text-red-200 text-[10px] px-3 text-center pointer-events-none">
+                        {t('预览加载失败（可点击进入灯箱重试）')}
                     </div>
                 )}
                 <div className={`absolute bottom-0 left-0 right-0 h-1 ${theme === 'dark' ? 'bg-zinc-800' : theme === 'solarized' ? 'bg-zinc-200' : 'bg-zinc-200'}`}>
@@ -1168,6 +1232,11 @@ const HistoryItem = memo(({
                 {item.status === 'generating' && (
                     <p className="text-[9px] text-blue-500 mt-1">
                         {item.errorMsg || '生成中...'}
+                    </p>
+                )}
+                {throttleInfo && (
+                    <p className={`text-[9px] mt-1 ${hasThrottleWarning ? 'text-amber-400' : (theme === 'dark' ? 'text-zinc-500' : 'text-zinc-500')}`}>
+                        {throttleInfo}
                     </p>
                 )}
 
@@ -1946,6 +2015,80 @@ const isSameShotId = (a, b) => {
     }
     return false;
 };
+const MAX_STORYBOARD_OUTPUT_HISTORY = 20;
+const makeStoryboardShotFocusKey = (nodeId, shotId) => `${encodeURIComponent(String(nodeId || ''))}::${encodeURIComponent(String(shotId || ''))}`;
+const normalizeStoryboardOutputSnapshot = (shotLike) => {
+    if (!shotLike || typeof shotLike !== 'object') return null;
+    const explicitVideoUrl = String(shotLike.video_url || '').trim();
+    const explicitImages = Array.isArray(shotLike.output_images)
+        ? shotLike.output_images.map((url) => String(url || '').trim()).filter(Boolean)
+        : [];
+    const explicitOutputUrl = String(shotLike.output_url || '').trim();
+    const mode = explicitVideoUrl || (explicitOutputUrl && isVideoUrl(explicitOutputUrl))
+        ? 'video'
+        : 'image';
+    if (mode === 'video') {
+        const videoUrl = explicitVideoUrl || explicitOutputUrl;
+        if (!videoUrl) return null;
+        return {
+            mode: 'video',
+            output_url: videoUrl,
+            video_url: videoUrl,
+            output_images: [],
+            selectedImageIndex: -1
+        };
+    }
+    const imageUrls = explicitImages.length > 0
+        ? explicitImages
+        : (explicitOutputUrl ? [explicitOutputUrl] : []);
+    if (imageUrls.length === 0) return null;
+    const selectedRaw = Number.isInteger(shotLike.selectedImageIndex)
+        ? shotLike.selectedImageIndex
+        : 0;
+    const selectedImageIndex = Math.max(-1, Math.min(imageUrls.length - 1, selectedRaw));
+    return {
+        mode: 'image',
+        output_url: imageUrls[0],
+        video_url: '',
+        output_images: imageUrls,
+        selectedImageIndex
+    };
+};
+const isSameStoryboardOutputSnapshot = (a, b) => {
+    if (!a || !b) return false;
+    if (a.mode !== b.mode) return false;
+    if (String(a.output_url || '') !== String(b.output_url || '')) return false;
+    if (String(a.video_url || '') !== String(b.video_url || '')) return false;
+    const imagesA = Array.isArray(a.output_images) ? a.output_images : [];
+    const imagesB = Array.isArray(b.output_images) ? b.output_images : [];
+    if (imagesA.length !== imagesB.length) return false;
+    for (let i = 0; i < imagesA.length; i += 1) {
+        if (String(imagesA[i] || '') !== String(imagesB[i] || '')) return false;
+    }
+    return Number(a.selectedImageIndex ?? -1) === Number(b.selectedImageIndex ?? -1);
+};
+const materializeStoryboardOutputFromSnapshot = (snapshot, currentShot) => {
+    const normalized = normalizeStoryboardOutputSnapshot(snapshot) || normalizeStoryboardOutputSnapshot(currentShot);
+    if (!normalized) return null;
+    if (normalized.mode === 'video') {
+        return {
+            video_url: normalized.video_url,
+            output_url: normalized.output_url,
+            output_images: [],
+            selectedImageIndex: -1
+        };
+    }
+    const outputImages = Array.isArray(normalized.output_images) ? normalized.output_images : [];
+    const safeIndex = Number.isInteger(normalized.selectedImageIndex)
+        ? Math.max(-1, Math.min(outputImages.length - 1, normalized.selectedImageIndex))
+        : (outputImages.length > 0 ? 0 : -1);
+    return {
+        video_url: '',
+        output_images: outputImages,
+        output_url: outputImages[0] || '',
+        selectedImageIndex: safeIndex
+    };
+};
 const isStoryboardDebugEnabled = () => {
     try {
         return localStorage.getItem('tapnow_debug_storyboard') === '1';
@@ -2042,6 +2185,10 @@ const buildEmptyAsyncConfig = () => ({
 });
 const IMAGE_BATCH_MODE_PARALLEL_AGGREGATE = 'parallel_aggregate';
 const IMAGE_BATCH_MODE_STANDARD_BATCH = 'standard_batch';
+const IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO = 'auto';
+const IMAGE_NATIVE_MULTI_IMAGE_MODE_FORCE = 'force_native';
+const IMAGE_NATIVE_MULTI_IMAGE_MODE_DISABLE = 'disable_native';
+const NATIVE_MULTI_IMAGE_CAPABILITY_STORAGE_KEY = 'tapnow_native_multi_image_capabilities';
 const NODE_IO_ENVELOPE_VERSION = '1.0';
 
 const DEFAULT_MODEL_LIBRARY = [
@@ -2060,6 +2207,7 @@ const DEFAULT_MODEL_LIBRARY = [
                 disabled: false,
                 imageRouteMode: 'auto',
                 imageBatchMode: IMAGE_BATCH_MODE_PARALLEL_AGGREGATE,
+                nativeMultiImageMode: IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO,
                 ratioLimits: null,
                 defaultRatio: '',
                 resolutionLimits: null,
@@ -2124,6 +2272,29 @@ const normalizeImageBatchMode = (value) => {
         return IMAGE_BATCH_MODE_STANDARD_BATCH;
     }
     return IMAGE_BATCH_MODE_PARALLEL_AGGREGATE;
+};
+const normalizeNativeMultiImageMode = (value) => {
+    const mode = String(value || '').trim().toLowerCase();
+    if (
+        mode === IMAGE_NATIVE_MULTI_IMAGE_MODE_FORCE
+        || mode === 'force'
+        || mode === 'native'
+        || mode === 'enabled'
+        || mode === 'on'
+        || mode === 'true'
+    ) {
+        return IMAGE_NATIVE_MULTI_IMAGE_MODE_FORCE;
+    }
+    if (
+        mode === IMAGE_NATIVE_MULTI_IMAGE_MODE_DISABLE
+        || mode === 'disable'
+        || mode === 'disabled'
+        || mode === 'off'
+        || mode === 'false'
+    ) {
+        return IMAGE_NATIVE_MULTI_IMAGE_MODE_DISABLE;
+    }
+    return IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO;
 };
 const normalizeNodeIOMediaType = (type, url = '') => {
     const raw = String(type || '').trim().toLowerCase();
@@ -2290,6 +2461,9 @@ const STORYBOARD_PROMPT_SLOT_OPTIONS = [
     { key: 'memory1', label: '记忆1', editable: true },
     { key: 'memory2', label: '记忆2', editable: true }
 ];
+const STORYBOARD_EDITABLE_PROMPT_SLOT_KEYS = STORYBOARD_PROMPT_SLOT_OPTIONS
+    .filter((item) => item.editable)
+    .map((item) => item.key);
 const STORYBOARD_DEFAULT_TABLE_HEADERS = [
     '场次镜号',
     '时长',
@@ -2311,6 +2485,14 @@ const STORYBOARD_DEFAULT_TABLE_HEADERS = [
 const STORYBOARD_DEFAULT_MODE = 'image';
 const STORYBOARD_VIEW_MODES = ['cards', 'table'];
 const STORYBOARD_DEFAULT_VIEW_MODE = 'cards';
+const STORYBOARD_WORKSPACE_MIN_HEIGHT = 96;
+const STORYBOARD_WORKSPACE_MAX_HEIGHT = 360;
+const STORYBOARD_WORKSPACE_DEFAULT_HEIGHT = 144;
+const normalizeStoryboardWorkspaceHeight = (value, fallback = STORYBOARD_WORKSPACE_DEFAULT_HEIGHT) => {
+    const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(STORYBOARD_WORKSPACE_MIN_HEIGHT, Math.min(parsed, STORYBOARD_WORKSPACE_MAX_HEIGHT));
+};
 const MAX_CUSTOM_PARAM_VALUES = 50;
 const COMPLETED_STATUS_SET = new Set(['completed', 'complete', 'success', 'succeeded', 'done', 'finished', 'ok']);
 const normalizeStoryboardMode = (mode) => (String(mode || '').toLowerCase() === 'video' ? 'video' : STORYBOARD_DEFAULT_MODE);
@@ -2357,6 +2539,87 @@ const parseMarkdownTable = (text = '') => {
         if (normalized.some((cell) => cell)) rows.push(normalized);
     }
     return { headers, rows };
+};
+const parseDelimitedRow = (line = '', delimiter = ',') => {
+    const raw = String(line ?? '');
+    const cells = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < raw.length; i += 1) {
+        const char = raw[i];
+        if (char === '"') {
+            if (inQuotes && raw[i + 1] === '"') {
+                current += '"';
+                i += 1;
+                continue;
+            }
+            inQuotes = !inQuotes;
+            continue;
+        }
+        if (char === delimiter && !inQuotes) {
+            cells.push(current.trim());
+            current = '';
+            continue;
+        }
+        current += char;
+    }
+    cells.push(current.trim());
+    return cells;
+};
+const detectDelimitedSeparator = (lines = []) => {
+    const candidates = ['\t', ',', ';'];
+    let bestDelimiter = '';
+    let bestScore = 0;
+    candidates.forEach((delimiter) => {
+        const score = lines.slice(0, 8).reduce((acc, line) => {
+            const row = parseDelimitedRow(line, delimiter);
+            return acc + Math.max(0, row.length - 1);
+        }, 0);
+        if (score > bestScore) {
+            bestDelimiter = delimiter;
+            bestScore = score;
+        }
+    });
+    return bestScore > 0 ? bestDelimiter : '';
+};
+const parseDelimitedTable = (text = '') => {
+    if (!text || typeof text !== 'string') return null;
+    const lines = text
+        .replace(/^\uFEFF/, '')
+        .split(/\r?\n/)
+        .map((line) => String(line || '').trim())
+        .filter((line) => line.length > 0);
+    if (lines.length < 2) return null;
+    const delimiter = detectDelimitedSeparator(lines);
+    if (!delimiter) return null;
+    const parsedRows = lines.map((line) => parseDelimitedRow(line, delimiter));
+    const maxColumns = parsedRows.reduce((max, row) => Math.max(max, row.length), 0);
+    if (maxColumns < 2) return null;
+    const normalizeRow = (row) => Array.from({ length: maxColumns }, (_, idx) => String(row[idx] ?? '').trim());
+    const isSeparatorRow = (row) => row.every((cell) => /^:?-{3,}:?$/.test(String(cell || '').replace(/\s+/g, '')));
+    const headerRow = normalizeRow(parsedRows[0]);
+    if (!headerRow.some((cell) => !!cell)) return null;
+    const rawDataRows = parsedRows.slice(1);
+    const startIndex = rawDataRows.length > 0 && isSeparatorRow(normalizeRow(rawDataRows[0])) ? 1 : 0;
+    const rows = rawDataRows
+        .slice(startIndex)
+        .map((row) => normalizeRow(row))
+        .filter((row) => row.some((cell) => !!cell));
+    return { headers: headerRow, rows, delimiter };
+};
+const parseStoryboardTableInput = (text = '') => {
+    const rawText = String(text || '').replace(/^\uFEFF/, '').trim();
+    if (!rawText) return { table: null, format: 'empty' };
+    const markdownTable = parseMarkdownTable(rawText);
+    if (markdownTable) return { table: markdownTable, format: 'markdown' };
+    const delimitedTable = parseDelimitedTable(rawText);
+    if (delimitedTable) {
+        return {
+            table: { headers: delimitedTable.headers, rows: delimitedTable.rows },
+            format: delimitedTable.delimiter === '\t' ? 'tsv' : 'csv'
+        };
+    }
+    return { table: null, format: 'unknown' };
 };
 const stringifyMarkdownTable = (tableData) => {
     const headers = Array.isArray(tableData?.headers)
@@ -2700,6 +2963,43 @@ const resolveImageConcurrencyFromCustomParams = (customParams, selections, fallb
     }
     return safeFallback;
 };
+const detectThrottleSignalsFromError = (message = '') => {
+    const text = String(message || '');
+    const is429 = /(^|[^\d])429([^\d]|$)/.test(text) || /too many requests/i.test(text);
+    const isTimeout = /timeout|timed out|超时/i.test(text);
+    return {
+        http429Count: is429 ? 1 : 0,
+        timeoutCount: isTimeout ? 1 : 0
+    };
+};
+const attachHistoryThrottleStats = (historyItem, message = '', patch = {}) => {
+    if (!historyItem || typeof historyItem !== 'object') return historyItem;
+    const current = historyItem.throttleStats && typeof historyItem.throttleStats === 'object'
+        ? historyItem.throttleStats
+        : {};
+    const signals = detectThrottleSignalsFromError(message);
+    const next = {
+        dispatchIntervalSec: Number.isFinite(Number(patch.dispatchIntervalSec))
+            ? Number(patch.dispatchIntervalSec)
+            : (Number.isFinite(Number(current.dispatchIntervalSec)) ? Number(current.dispatchIntervalSec) : 0),
+        requestedImageCount: patch.requestedImageCount ?? current.requestedImageCount ?? null,
+        imageBatchMode: patch.imageBatchMode ?? current.imageBatchMode ?? null,
+        retryCount: Math.max(0, Number(current.retryCount || 0) + Math.max(0, Number(patch.retryCountInc || 0))),
+        http429Count: Math.max(0, Number(current.http429Count || 0) + signals.http429Count + Math.max(0, Number(patch.http429CountInc || 0))),
+        timeoutCount: Math.max(0, Number(current.timeoutCount || 0) + signals.timeoutCount + Math.max(0, Number(patch.timeoutCountInc || 0))),
+        fallbackToParallel: patch.fallbackToParallel === true ? true : !!current.fallbackToParallel,
+        lastErrorType: patch.lastErrorType
+            || (signals.http429Count > 0 ? 'http_429' : '')
+            || (signals.timeoutCount > 0 ? 'timeout' : '')
+            || current.lastErrorType
+            || '',
+        lastErrorAt: patch.touchError ? Date.now() : (current.lastErrorAt || null)
+    };
+    return {
+        ...historyItem,
+        throttleStats: next
+    };
+};
 const applyBatchFailureToHistoryItem = (historyItem, taskId, errorMsg, durationMs, consumeBatchFailure) => {
     if (typeof consumeBatchFailure !== 'function') return null;
     const batchFailure = consumeBatchFailure(taskId);
@@ -2709,29 +3009,29 @@ const applyBatchFailureToHistoryItem = (historyItem, taskId, errorMsg, durationM
     const hasOutput = Array.isArray(historyItem?.output_images) && historyItem.output_images.length > 0;
     const progress = Math.max(10, Math.min(95, Math.round((settled / total) * 95)));
     if (!batchFailure.done) {
-        return {
+        return attachHistoryThrottleStats({
             ...historyItem,
             status: 'generating',
             progress: Math.max(historyItem?.progress || 5, progress),
             errorMsg: hasOutput ? (historyItem?.errorMsg || null) : errorMsg,
             durationMs: durationMs ?? historyItem?.durationMs ?? null
-        };
+        }, errorMsg, { touchError: true, lastErrorType: 'batch_partial_failure' });
     }
     if (hasOutput || Number(batchFailure.completed || 0) > 0) {
-        return {
+        return attachHistoryThrottleStats({
             ...historyItem,
             status: 'completed',
             progress: 100,
             errorMsg: hasOutput ? null : (historyItem?.errorMsg || null),
             durationMs: durationMs ?? historyItem?.durationMs ?? null
-        };
+        }, '', { lastErrorType: '' });
     }
-    return {
+    return attachHistoryThrottleStats({
         ...historyItem,
         status: 'failed',
         errorMsg,
         durationMs: durationMs ?? historyItem?.durationMs ?? null
-    };
+    }, errorMsg, { touchError: true, lastErrorType: 'batch_failed' });
 };
 const normalizePreviewOverridePatch = (patch) => {
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return null;
@@ -2892,6 +3192,12 @@ const normalizeModelLibraryEntry = (entry, index = 0) => {
         disabled: !!entry.disabled,
         imageRouteMode: normalizeImageRouteMode(entry.imageRouteMode || entry.antigravityRouteMode),
         imageBatchMode: normalizeImageBatchMode(entry.imageBatchMode || entry.batchMode || entry.multiImageMode),
+        nativeMultiImageMode: normalizeNativeMultiImageMode(
+            entry.nativeMultiImageMode
+            || entry.nativeImageBatchMode
+            || entry.nativeMultiOutputMode
+            || entry.nativeMultiImage
+        ),
         ratioLimits: Array.isArray(entry.ratioLimits) ? entry.ratioLimits : null,
         defaultRatio: normalizedDefaultRatio,
         ratioNotes: normalizeValueNotes(entry.ratioNotes),
@@ -3927,14 +4233,21 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     }, [item, sourceList.length]);
     const displayUrl = sourceList[activeSrcIndex] || item?.url || '';
     const [mediaReady, setMediaReady] = useState(false);
+    const [mediaFailed, setMediaFailed] = useState(false);
     useEffect(() => {
         setMediaReady(false);
+        setMediaFailed(false);
     }, [displayUrl, item?.id, item?.selectedMjImageIndex, item?.type]);
     const navImages = useMemo(() => getLightboxNavImages(item), [item]);
     const handleMediaError = () => {
         logLightbox('media_error', { index: activeSrcIndex, total: sourceList.length });
         setMediaReady(false);
-        setActiveSrcIndex((prev) => (prev < sourceList.length - 1 ? prev + 1 : prev));
+        if (activeSrcIndex < sourceList.length - 1) {
+            setMediaFailed(false);
+            setActiveSrcIndex((prev) => (prev < sourceList.length - 1 ? prev + 1 : prev));
+            return;
+        }
+        setMediaFailed(true);
     };
     const handleClose = (reason = 'manual') => {
         logLightbox('close', { reason });
@@ -4106,7 +4419,10 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                         alt={item.prompt}
                         className="max-w-full max-h-[85vh] rounded-lg shadow-2xl object-contain"
                         onError={handleMediaError}
-                        onLoad={() => setMediaReady(true)}
+                        onLoad={() => {
+                            setMediaReady(true);
+                            setMediaFailed(false);
+                        }}
                     />
                 ) : (
                     <ResolvedVideo
@@ -4117,13 +4433,19 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
                         className="max-w-full max-h-[85vh] rounded-lg shadow-2xl"
                         poster={item.thumbnailUrl || undefined}
                         onError={handleMediaError}
-                        onLoadedMetadata={() => setMediaReady(true)}
-                        onCanPlay={() => setMediaReady(true)}
+                        onLoadedMetadata={() => {
+                            setMediaReady(true);
+                            setMediaFailed(false);
+                        }}
+                        onCanPlay={() => {
+                            setMediaReady(true);
+                            setMediaFailed(false);
+                        }}
                     />
                 )}
                 {!mediaReady && (
                     <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/35 text-white/80 text-xs pointer-events-none">
-                        {t('加载中...')}
+                        {mediaFailed ? t('媒体加载失败，请切换历史项或检查缓存') : t('加载中...')}
                     </div>
                 )}
                 <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md px-6 py-3 rounded-full text-white text-sm font-medium border border-white/10 text-center shadow-2xl">
@@ -4887,6 +5209,62 @@ function TapnowApp() {
             console.error('保存模型库折叠状态失败:', e);
         }
     }, [collapsedLibraryModels]);
+    const [nativeMultiImageCapabilities, setNativeMultiImageCapabilities] = useState(() => {
+        try {
+            const saved = localStorage.getItem(NATIVE_MULTI_IMAGE_CAPABILITY_STORAGE_KEY);
+            if (!saved) return {};
+            const parsed = JSON.parse(saved);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+            return parsed;
+        } catch (e) {
+            return {};
+        }
+    });
+    const nativeMultiImageCapabilitiesRef = useRef(nativeMultiImageCapabilities);
+    useEffect(() => {
+        nativeMultiImageCapabilitiesRef.current = nativeMultiImageCapabilities;
+        try {
+            localStorage.setItem(
+                NATIVE_MULTI_IMAGE_CAPABILITY_STORAGE_KEY,
+                JSON.stringify(nativeMultiImageCapabilities)
+            );
+        } catch (e) { }
+    }, [nativeMultiImageCapabilities]);
+    const getNativeMultiImageCapabilityKey = useCallback((modelId, configLike = null) => {
+        const provider = String(configLike?.provider || 'unknown').trim().toLowerCase() || 'unknown';
+        const apiType = String(configLike?.apiType || 'openai').trim().toLowerCase() || 'openai';
+        const id = String(modelId || configLike?.id || configLike?.modelName || '').trim().toLowerCase();
+        if (!id) return '';
+        return `${provider}::${apiType}::${id}`;
+    }, []);
+    const getNativeMultiImageCapabilityStatus = useCallback((modelId, configLike = null) => {
+        const key = getNativeMultiImageCapabilityKey(modelId, configLike);
+        if (!key) return '';
+        const entry = nativeMultiImageCapabilitiesRef.current?.[key];
+        const status = String(entry?.status || '').trim().toLowerCase();
+        return status === 'supported' || status === 'unsupported' ? status : '';
+    }, [getNativeMultiImageCapabilityKey]);
+    const updateNativeMultiImageCapability = useCallback((modelId, configLike, nextStatus, evidence = null) => {
+        const key = getNativeMultiImageCapabilityKey(modelId, configLike);
+        if (!key) return;
+        const normalizedStatus = String(nextStatus || '').trim().toLowerCase();
+        if (normalizedStatus !== 'supported' && normalizedStatus !== 'unsupported') return;
+        setNativeMultiImageCapabilities((prev) => {
+            const current = prev?.[key];
+            if (current?.status === normalizedStatus) return prev;
+            return {
+                ...(prev || {}),
+                [key]: {
+                    status: normalizedStatus,
+                    updatedAt: Date.now(),
+                    modelId: String(modelId || configLike?.id || ''),
+                    provider: String(configLike?.provider || ''),
+                    apiType: String(configLike?.apiType || ''),
+                    evidence: evidence && typeof evidence === 'object' ? evidence : null
+                }
+            };
+        });
+    }, [getNativeMultiImageCapabilityKey]);
 
     const [apiConfigs, setApiConfigs] = useState(() => {
         const saved = localStorage.getItem('tapnow_api_configs');
@@ -5765,7 +6143,31 @@ function TapnowApp() {
     const [isSelecting, setIsSelecting] = useState(false);
     const [selectionBox, setSelectionBox] = useState(null); // { startX, startY, endX, endY } (屏幕坐标)
     const [selectedNodeIds, setSelectedNodeIds] = useState(new Set()); // 多选节点ID集合
+    const [nodeSelectionPriority, setNodeSelectionPriority] = useState({}); // nodeId -> 最近点选顺序（越新越靠上）
     const isSelectingRef = useRef(false); // 使用ref跟踪框选状态，确保即使Ctrl松开也能继续框选
+    const nodeSelectionOrderRef = useRef(0);
+    const dragPriorityNodeIdsRef = useRef([]);
+    const touchNodeSelectionPriorityBatch = useCallback((nodeIds) => {
+        const normalizedIds = Array.from(new Set(
+            (Array.isArray(nodeIds) ? nodeIds : [nodeIds])
+                .map((id) => String(id || '').trim())
+                .filter(Boolean)
+        ));
+        if (normalizedIds.length === 0) return;
+        setNodeSelectionPriority((prev) => {
+            const next = { ...prev };
+            let nextOrder = nodeSelectionOrderRef.current;
+            normalizedIds.forEach((nodeId) => {
+                nextOrder += 1;
+                next[nodeId] = nextOrder;
+            });
+            nodeSelectionOrderRef.current = nextOrder;
+            return next;
+        });
+    }, []);
+    const touchNodeSelectionPriority = useCallback((nodeId) => {
+        touchNodeSelectionPriorityBatch([nodeId]);
+    }, [touchNodeSelectionPriorityBatch]);
 
     const [contextMenu, setContextMenu] = useState({ x: 0, y: 0, worldX: 0, worldY: 0, visible: false });
     const [contextMenuExpanded, setContextMenuExpanded] = useState(false);
@@ -8328,6 +8730,29 @@ function TapnowApp() {
         connectionsRef.current = connections;
         isSelectingRef.current = isSelecting; // 同步更新框选状态ref
     }, [nodes, selectedNodeId, selectedNodeIds, connections, isSelecting]);
+    useEffect(() => {
+        const aliveIds = new Set(nodes.map((node) => node.id));
+        setNodeSelectionPriority((prev) => {
+            let changed = false;
+            const next = {};
+            Object.entries(prev).forEach(([nodeId, order]) => {
+                if (aliveIds.has(nodeId)) {
+                    next[nodeId] = order;
+                } else {
+                    changed = true;
+                }
+            });
+            return changed ? next : prev;
+        });
+    }, [nodes]);
+    useEffect(() => {
+        const selectedIds = Array.from(new Set([
+            ...(selectedNodeIds ? Array.from(selectedNodeIds).filter(Boolean) : []),
+            selectedNodeId
+        ].filter(Boolean)));
+        if (selectedIds.length === 0) return;
+        touchNodeSelectionPriorityBatch(selectedIds);
+    }, [selectedNodeId, selectedNodeIds, touchNodeSelectionPriorityBatch]);
 
     // 使用 useMemo 创建 nodes Map，优化节点查找性能（O(1) 查找）
     const nodesMap = useMemo(() => {
@@ -8368,6 +8793,11 @@ function TapnowApp() {
                 resolvedLibrary
                     ? resolvedLibrary.imageBatchMode
                     : (config.imageBatchMode || config.batchMode || config.multiImageMode)
+            ),
+            nativeMultiImageMode: normalizeNativeMultiImageMode(
+                resolvedLibrary
+                    ? resolvedLibrary.nativeMultiImageMode
+                    : (config.nativeMultiImageMode || config.nativeImageBatchMode || config.nativeMultiOutputMode)
             ),
             ratioLimits: resolvedLibrary ? resolvedLibrary.ratioLimits : (config.ratioLimits || null),
             defaultRatio: resolvedLibrary ? String(resolvedLibrary.defaultRatio || '').trim() : String(config.defaultRatio || '').trim(),
@@ -10178,6 +10608,15 @@ function TapnowApp() {
     }, [isPanning, isSelecting, selectionBox, dragNodeId, resizingNodeId, screenToWorld, view.zoom, scheduleNodeUpdate, scheduleMultiNodeUpdate]);
 
     const handleMouseUp = () => {
+        const releasedDragNodeIds = Array.isArray(dragPriorityNodeIdsRef.current)
+            ? dragPriorityNodeIdsRef.current.filter(Boolean)
+            : [];
+        const commitDragPriority = () => {
+            if (releasedDragNodeIds.length > 0) {
+                touchNodeSelectionPriorityBatch(releasedDragNodeIds);
+            }
+            dragPriorityNodeIdsRef.current = [];
+        };
         // 清理画布拖动的 requestAnimationFrame
         if (panRafRef.current) {
             cancelAnimationFrame(panRafRef.current);
@@ -10230,6 +10669,7 @@ function TapnowApp() {
             multiNodeDragStartPos.current = null;
             // 清理 zoom 跟踪，防止缩放切换导致的状态不一致
             lastZoomRef.current = null;
+            commitDragPriority();
             return;
         }
 
@@ -10260,6 +10700,7 @@ function TapnowApp() {
         // 重置 lastMousePos，防止状态残留导致后续拖动异常
         // 注意：不重置为 null，而是重置为初始值，保持类型一致
         lastMousePos.current = { x: 0, y: 0 };
+        commitDragPriority();
     };
 
     // 优化后的全局指针事件监听：解决拖动中断和连线不跟随的问题
@@ -10309,6 +10750,13 @@ function TapnowApp() {
 
     const handleNodeMouseUp = useCallback((targetId, e, inputType = 'default') => {
         e.stopPropagation();
+        const releasedDragNodeIds = Array.isArray(dragPriorityNodeIdsRef.current)
+            ? dragPriorityNodeIdsRef.current.filter(Boolean)
+            : [];
+        if (releasedDragNodeIds.length > 0) {
+            touchNodeSelectionPriorityBatch(releasedDragNodeIds);
+        }
+        dragPriorityNodeIdsRef.current = [];
         // 从输出端口连接到输入端口（原有逻辑）
         if (connectingSource && connectingSource !== targetId) {
             // 检查是否已存在相同输入点的连接
@@ -10364,7 +10812,7 @@ function TapnowApp() {
         setIsPanning(false);
         setDragNodeId(null);
         setResizingNodeId(null);
-    }, [connectingSource, connectingTarget, connectingInputType, connections]);
+    }, [connectingSource, connectingTarget, connectingInputType, connections, touchNodeSelectionPriorityBatch]);
 
     const handleBackgroundClick = (e) => {
         if (connectingSource) {
@@ -10663,43 +11111,11 @@ function TapnowApp() {
         return texts;
     }, [getConnectedNodeIOEnvelopes]);
 
-    // 使用 useMemo 缓存特定输入点的图片URL
-    const connectedImageForInputCache = useMemo(() => {
-        const cache = new Map(); // `${nodeId}:${inputType}` -> imageUrl
-        connections.forEach(conn => {
-            const inputType = conn.inputType || 'default';
-            const key = `${conn.to}:${inputType}`;
-            if (!cache.has(key)) {
-                const sourceNode = nodesMap.get(conn.from);
-                if (sourceNode) {
-                    let imageUrl = null;
-                    if (sourceNode.type === 'video-input') {
-                        const selected = sourceNode.selectedKeyframes && sourceNode.selectedKeyframes.length > 0
-                            ? sourceNode.selectedKeyframes[0].url
-                            : null;
-                        if (selected) {
-                            imageUrl = selected;
-                        } else if (sourceNode.frames && sourceNode.frames[0]) {
-                            imageUrl = sourceNode.frames[0].url;
-                        }
-                    } else if (sourceNode.type === 'input-image' && sourceNode.content) {
-                        imageUrl = sourceNode.content;
-                    }
-                    if (imageUrl) {
-                        cache.set(key, imageUrl);
-                    }
-                }
-            }
-        });
-        return cache;
-        // V3.5.20-1: 使用 nodes 数组作为依赖，React 会进行浅比较
-    }, [connections, nodesMap, nodes]);
-
-    // 获取连接到特定输入点的图片URL
+    // 获取连接到特定输入点的首张图片URL（统一走 NodeIOEnvelope）
     const getConnectedImageForInput = useCallback((targetNodeId, inputType) => {
-        const key = `${targetNodeId}:${inputType || 'default'}`;
-        return connectedImageForInputCache.get(key) || null;
-    }, [connectedImageForInputCache]);
+        const images = getConnectedInputImages(targetNodeId, inputType || 'default');
+        return images[0] || null;
+    }, [getConnectedInputImages]);
 
 
     // 将生成结果同步到连接的预览节点
@@ -10797,6 +11213,7 @@ function TapnowApp() {
             disabled: false,
             imageRouteMode: 'auto',
             imageBatchMode: IMAGE_BATCH_MODE_PARALLEL_AGGREGATE,
+            nativeMultiImageMode: IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO,
             ratioLimits: null,
             defaultRatio: '',
             ratioNotes: {},
@@ -14863,11 +15280,47 @@ function TapnowApp() {
                 || node?.settings?.imageBatchMode
             )
             : IMAGE_BATCH_MODE_PARALLEL_AGGREGATE;
-        const shouldUseStandardBatchMode = type === 'image'
+        const nativeMultiImageMode = type === 'image'
+            ? normalizeNativeMultiImageMode(
+                options.nativeMultiImageMode
+                || resolvedConfig?.nativeMultiImageMode
+                || node?.settings?.nativeMultiImageMode
+            )
+            : IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO;
+        const detectedNativeMultiImageCapability = type === 'image'
+            ? getNativeMultiImageCapabilityStatus(modelId, resolvedConfig)
+            : '';
+        const shouldAutoProbeNativeMultiImage = type === 'image'
             && requestedImageConcurrency > 1
-            && requestedImageBatchMode === IMAGE_BATCH_MODE_STANDARD_BATCH;
+            && requestedImageBatchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE
+            && nativeMultiImageMode === IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO
+            && detectedNativeMultiImageCapability !== 'supported'
+            && !options._standardBatchFallback;
+        const activeImageBatchMode = shouldAutoProbeNativeMultiImage
+            ? IMAGE_BATCH_MODE_STANDARD_BATCH
+            : requestedImageBatchMode;
+        const supportsNativeMultiImage = type === 'image' && (
+            nativeMultiImageMode === IMAGE_NATIVE_MULTI_IMAGE_MODE_FORCE
+            || (
+                nativeMultiImageMode === IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO
+                && detectedNativeMultiImageCapability === 'supported'
+            )
+        );
+        const shouldPreferNativeSingleRequest = type === 'image'
+            && requestedImageConcurrency > 1
+            && activeImageBatchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE
+            && supportsNativeMultiImage;
+        const effectiveImageConcurrency = shouldPreferNativeSingleRequest ? 1 : requestedImageConcurrency;
+        const shouldUseStandardBatchMode = type === 'image'
+            && effectiveImageConcurrency > 1
+            && activeImageBatchMode === IMAGE_BATCH_MODE_STANDARD_BATCH;
+        const isNativeBatchProbeRun = type === 'image'
+            && shouldUseStandardBatchMode
+            && requestedImageBatchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE
+            && nativeMultiImageMode === IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO
+            && detectedNativeMultiImageCapability !== 'supported';
         const requestedImageCountForSubmit = shouldUseStandardBatchMode
-            ? requestedImageConcurrency
+            ? effectiveImageConcurrency
             : 1;
         const requestedDispatchIntervalSec = type === 'image'
             ? normalizeImageDispatchIntervalSeconds(
@@ -14876,6 +15329,15 @@ function TapnowApp() {
             )
             : DEFAULT_IMAGE_DISPATCH_INTERVAL_SECONDS;
         const requestedDispatchIntervalMs = Math.round(requestedDispatchIntervalSec * 1000);
+        if (shouldPreferNativeSingleRequest && !options._isRetry && !options._batchImageDispatched) {
+            const nativeHint = nativeMultiImageMode === IMAGE_NATIVE_MULTI_IMAGE_MODE_FORCE
+                ? `${modelId} 已按模型设置启用原生多图，已关闭并发聚合。`
+                : `检测到 ${modelId} 支持原生多图，已自动关闭并发聚合。`;
+            showToast(nativeHint, 'warning', 3200);
+        }
+        if (isNativeBatchProbeRun && !options._isRetry && !options._batchImageDispatched) {
+            showToast(`正在探测 ${modelId} 的原生多图能力，优先尝试单任务返图。`, 'info', 2600);
+        }
         // V3.4.19: 使用统一的 getApiCredentials 获取凭据（只从Provider获取）
         const credentials = getApiCredentials(modelId);
         let apiKeyRaw = credentials.key;
@@ -15053,8 +15515,21 @@ function TapnowApp() {
                 duration: type === 'video' ? duration : null,
                 hasInputImages: connectedImages.length > 0, // V3.7.26: 是否有参考图（用于判断文→图还是图→图）
                 customParams: customParamSelections || null,
-                imageBatchMode: type === 'image' ? requestedImageBatchMode : null,
-                requestedImageCount: type === 'image' ? requestedImageConcurrency : 1
+                imageBatchMode: type === 'image' ? activeImageBatchMode : null,
+                requestedImageCount: type === 'image' ? effectiveImageConcurrency : 1,
+                throttleStats: type === 'image'
+                    ? {
+                        dispatchIntervalSec: requestedDispatchIntervalSec,
+                        requestedImageCount: effectiveImageConcurrency,
+                        imageBatchMode: activeImageBatchMode,
+                        retryCount: 0,
+                        http429Count: 0,
+                        timeoutCount: 0,
+                        fallbackToParallel: false,
+                        lastErrorType: '',
+                        lastErrorAt: null
+                    }
+                    : null
             }, ...prev]);
         }
 
@@ -15094,13 +15569,13 @@ function TapnowApp() {
 
         if (
             type === 'image'
-            && requestedImageConcurrency > 1
-            && requestedImageBatchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE
+            && effectiveImageConcurrency > 1
+            && activeImageBatchMode === IMAGE_BATCH_MODE_PARALLEL_AGGREGATE
             && !options._batchImageDispatched
             && !options._isRetry
         ) {
             imageBatchTaskMapRef.current.set(taskId, {
-                total: requestedImageConcurrency,
+                total: effectiveImageConcurrency,
                 completed: 0,
                 failed: 0,
                 intervalMs: requestedDispatchIntervalMs
@@ -15114,7 +15589,7 @@ function TapnowApp() {
                 imageConcurrency: 1,
                 concurrentImages: 1
             };
-            for (let idx = 0; idx < requestedImageConcurrency; idx += 1) {
+            for (let idx = 0; idx < effectiveImageConcurrency; idx += 1) {
                 if (idx > 0 && requestedDispatchIntervalMs > 0) {
                     await waitForMilliseconds(requestedDispatchIntervalMs);
                 }
@@ -15126,7 +15601,7 @@ function TapnowApp() {
                 });
             }
             const intervalLabel = (requestedDispatchIntervalMs / 1000).toFixed(requestedDispatchIntervalMs % 1000 === 0 ? 0 : 1);
-            showToast(`已发起 ${requestedImageConcurrency} 张并发生成（同窗口聚合，间隔 ${intervalLabel}s）`, 'success', 2600);
+            showToast(`已发起 ${effectiveImageConcurrency} 张并发生成（同窗口聚合，间隔 ${intervalLabel}s）`, 'success', 2600);
             return;
         }
 
@@ -15831,8 +16306,8 @@ function TapnowApp() {
                         seed: node?.settings?.seed,
                         n: requestedImageCountForSubmit,
                         imageCount: requestedImageCountForSubmit,
-                        requestedImageCount: requestedImageConcurrency,
-                        imageBatchMode: requestedImageBatchMode,
+                        requestedImageCount: effectiveImageConcurrency,
+                        imageBatchMode: activeImageBatchMode,
                         provider: {
                             key: apiKey,
                             baseUrl,
@@ -15890,8 +16365,8 @@ function TapnowApp() {
                             seed: node?.settings?.seed,
                             n: requestedImageCountForSubmit,
                             imageCount: requestedImageCountForSubmit,
-                            requestedImageCount: requestedImageConcurrency,
-                            imageBatchMode: requestedImageBatchMode,
+                            requestedImageCount: effectiveImageConcurrency,
+                            imageBatchMode: activeImageBatchMode,
                             provider: {
                                 key: apiKey,
                                 baseUrl,
@@ -16484,6 +16959,23 @@ function TapnowApp() {
                 if (imageUrls.length === 0) {
                     console.warn('[Image Parse] 图片URL规范化后为空');
                     throw new Error('图片返回结果无效');
+                }
+                if (type === 'image') {
+                    if (imageUrls.length > 1) {
+                        updateNativeMultiImageCapability(modelId, resolvedConfig, 'supported', {
+                            detectedBy: 'response_images_count',
+                            returnedCount: imageUrls.length,
+                            requestedCount: requestedImageCountForSubmit,
+                            batchMode: activeImageBatchMode
+                        });
+                    } else if (shouldUseStandardBatchMode && requestedImageCountForSubmit > 1 && imageUrls.length <= 1) {
+                        updateNativeMultiImageCapability(modelId, resolvedConfig, 'unsupported', {
+                            detectedBy: 'standard_batch_single_output',
+                            returnedCount: imageUrls.length,
+                            requestedCount: requestedImageCountForSubmit,
+                            batchMode: activeImageBatchMode
+                        });
+                    }
                 }
                 if (
                     shouldUseStandardBatchMode
@@ -17389,21 +17881,74 @@ function TapnowApp() {
         } catch (err) {
             // V3.5.12: If error has shouldRetry flag, recursively retry with new key
             if (err.shouldRetry) {
+                if (type === 'image') {
+                    const retryMessage = err?.message || '重试中';
+                    setHistory((prev) => prev.map((hItem) => {
+                        if (hItem.id !== taskId) return hItem;
+                        return attachHistoryThrottleStats({
+                            ...hItem,
+                            status: 'generating',
+                            errorMsg: retryMessage
+                        }, retryMessage, {
+                            retryCountInc: 1,
+                            touchError: true,
+                            dispatchIntervalSec: requestedDispatchIntervalSec,
+                            requestedImageCount: effectiveImageConcurrency,
+                            imageBatchMode: activeImageBatchMode,
+                            lastErrorType: 'retry'
+                        });
+                    }));
+                    if (requestedDispatchIntervalMs > 0) {
+                        await waitForMilliseconds(requestedDispatchIntervalMs);
+                    }
+                }
                 // V3.5.31: Pass _isRetry and _existingTaskId to prevent duplicate history items
                 return startGeneration(prompt, type, sourceImages, nodeId, { ...options, _isRetry: true, _existingTaskId: taskId });
             }
             if (
                 type === 'image'
-                && requestedImageConcurrency > 1
-                && requestedImageBatchMode === IMAGE_BATCH_MODE_STANDARD_BATCH
+                && effectiveImageConcurrency > 1
+                && shouldUseStandardBatchMode
                 && !options._standardBatchFallback
             ) {
                 console.warn('[Image Batch] standard_batch failed, fallback to parallel_aggregate', {
                     taskId,
-                    requestedImageConcurrency,
+                    requestedImageConcurrency: effectiveImageConcurrency,
                     err: err?.message || err
                 });
-                showToast(`标准批次失败，已回退并发聚合（${requestedImageConcurrency} 张）`, 'warning', 2800);
+                const fallbackErrMessage = String(err?.message || '');
+                const unsupportedByError = /standard_batch_single_output|标准批次返图数量不足|unsupported|not\s*support|unknown\s*parameter.*\bn\b|invalid.*\bn\b/i.test(fallbackErrMessage);
+                if (isNativeBatchProbeRun && unsupportedByError) {
+                    updateNativeMultiImageCapability(modelId, resolvedConfig, 'unsupported', {
+                        detectedBy: 'standard_batch_fallback_error',
+                        requestedCount: effectiveImageConcurrency,
+                        batchMode: activeImageBatchMode,
+                        message: fallbackErrMessage.slice(0, 240)
+                    });
+                }
+                const fallbackHint = isNativeBatchProbeRun
+                    ? `原生多图探测失败，已回退并发聚合（${effectiveImageConcurrency} 张）`
+                    : `标准批次失败，已回退并发聚合（${effectiveImageConcurrency} 张）`;
+                showToast(fallbackHint, 'warning', 2800);
+                setHistory((prev) => prev.map((hItem) => {
+                    if (hItem.id !== taskId) return hItem;
+                    return attachHistoryThrottleStats({
+                        ...hItem,
+                        status: 'generating',
+                        errorMsg: fallbackHint
+                    }, err?.message || '', {
+                        retryCountInc: 1,
+                        fallbackToParallel: true,
+                        touchError: true,
+                        dispatchIntervalSec: requestedDispatchIntervalSec,
+                        requestedImageCount: effectiveImageConcurrency,
+                        imageBatchMode: activeImageBatchMode,
+                        lastErrorType: 'standard_batch_fallback'
+                    });
+                }));
+                if (requestedDispatchIntervalMs > 0) {
+                    await waitForMilliseconds(requestedDispatchIntervalMs);
+                }
                 return startGeneration(prompt, type, sourceImages, nodeId, {
                     ...options,
                     _isRetry: false,
@@ -17413,8 +17958,8 @@ function TapnowApp() {
                     _batchImageDispatched: false,
                     _batchAggregate: false,
                     imageBatchMode: IMAGE_BATCH_MODE_PARALLEL_AGGREGATE,
-                    imageConcurrency: requestedImageConcurrency,
-                    concurrentImages: requestedImageConcurrency
+                    imageConcurrency: effectiveImageConcurrency,
+                    concurrentImages: effectiveImageConcurrency
                 });
             }
 
@@ -17469,27 +18014,63 @@ function TapnowApp() {
                         const hasOutput = Array.isArray(hItem.output_images) && hItem.output_images.length > 0;
                         const progress = Math.max(10, Math.min(95, Math.round((batchFailure.settled / batchFailure.total) * 95)));
                         if (!batchFailure.done) {
-                            return {
+                            return attachHistoryThrottleStats({
                                 ...hItem,
                                 status: 'generating',
                                 progress: Math.max(hItem.progress || 5, progress),
                                 errorMsg: hasOutput ? hItem.errorMsg : errorMsg
-                            };
+                            }, errorMsg, {
+                                touchError: true,
+                                dispatchIntervalSec: requestedDispatchIntervalSec,
+                                requestedImageCount: effectiveImageConcurrency,
+                                imageBatchMode: activeImageBatchMode,
+                                lastErrorType: 'batch_partial_failure'
+                            });
                         }
                         if (hasOutput) {
-                            return {
+                            return attachHistoryThrottleStats({
                                 ...hItem,
                                 status: 'completed',
                                 progress: 100
-                            };
+                            }, '', {
+                                dispatchIntervalSec: requestedDispatchIntervalSec,
+                                requestedImageCount: effectiveImageConcurrency,
+                                imageBatchMode: activeImageBatchMode,
+                                lastErrorType: ''
+                            });
                         }
-                        return { ...hItem, status: 'failed', errorMsg, durationMs };
+                        return attachHistoryThrottleStats({
+                            ...hItem,
+                            status: 'failed',
+                            errorMsg,
+                            durationMs
+                        }, errorMsg, {
+                            touchError: true,
+                            dispatchIntervalSec: requestedDispatchIntervalSec,
+                            requestedImageCount: effectiveImageConcurrency,
+                            imageBatchMode: activeImageBatchMode,
+                            lastErrorType: 'batch_failed'
+                        });
                     }));
                     return;
                 }
             }
             // V3.5.12: Include durationMs to stop timer when failed
-            setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'failed', errorMsg, durationMs } : hItem));
+            setHistory((prev) => prev.map((hItem) => {
+                if (hItem.id !== taskId) return hItem;
+                return attachHistoryThrottleStats({
+                    ...hItem,
+                    status: 'failed',
+                    errorMsg,
+                    durationMs
+                }, errorMsg, {
+                    touchError: true,
+                    dispatchIntervalSec: requestedDispatchIntervalSec,
+                    requestedImageCount: effectiveImageConcurrency,
+                    imageBatchMode: activeImageBatchMode,
+                    lastErrorType: 'failed'
+                });
+            }));
         }
     };
 
@@ -19070,7 +19651,8 @@ function TapnowApp() {
                                 shots: [],
                                 tableMarkdown: '',
                                 tableData: null,
-                                tableMarkdownCollapsed: false
+                                tableMarkdownCollapsed: false,
+                                llmWorkspaceHeight: STORYBOARD_WORKSPACE_DEFAULT_HEIGHT
                             }
                                     : type === 'text-node'
                                         ? { text: initialContent || '' }
@@ -19703,6 +20285,116 @@ function TapnowApp() {
         }
         return defaultPrompt;
     };
+    const normalizeImportedStoryboardPromptSlots = (payload) => {
+        if (!payload || typeof payload !== 'object') return {};
+        const next = {};
+        const applySlotValue = (mode, slot, value) => {
+            if (!STORYBOARD_LLM_PROMPT_MODES.includes(mode)) return;
+            if (!STORYBOARD_EDITABLE_PROMPT_SLOT_KEYS.includes(slot)) return;
+            if (typeof value !== 'string') return;
+            const trimmed = String(value).trim();
+            if (!trimmed) return;
+            next[`${mode}:${slot}`] = value;
+        };
+        Object.entries(payload).forEach(([key, value]) => {
+            if (key.includes(':')) {
+                const [mode, slot] = key.split(':');
+                applySlotValue(mode, slot, value);
+                return;
+            }
+            if (STORYBOARD_LLM_PROMPT_MODES.includes(key) && value && typeof value === 'object') {
+                STORYBOARD_EDITABLE_PROMPT_SLOT_KEYS.forEach((slot) => {
+                    applySlotValue(key, slot, value[slot]);
+                });
+            }
+        });
+        return next;
+    };
+    const exportStoryboardPromptSlots = useCallback(async (nodeId) => {
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return;
+        const currentSlots = node.settings?.llmPromptSlots && typeof node.settings.llmPromptSlots === 'object'
+            ? node.settings.llmPromptSlots
+            : {};
+        const payload = {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            llmPromptSlotSelection: node.settings?.llmPromptSlotSelection || {},
+            llmPromptSlots: normalizeImportedStoryboardPromptSlots(currentSlots)
+        };
+        const jsonText = JSON.stringify(payload, null, 2);
+        try {
+            if (navigator?.clipboard?.writeText) {
+                await navigator.clipboard.writeText(jsonText);
+                showToast('LLM 记忆槽已复制到剪贴板', 'success', 2200);
+                return;
+            }
+        } catch (err) { }
+        window.prompt('复制以下 JSON（可用于导入记忆槽）', jsonText);
+        showToast('浏览器限制剪贴板写入，已打开复制窗口', 'warning', 2600);
+    }, [nodesMap, showToast]);
+    const importStoryboardPromptSlots = useCallback(async (nodeId) => {
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return;
+        let rawText = '';
+        try {
+            if (navigator?.clipboard?.readText) {
+                rawText = await navigator.clipboard.readText();
+            }
+        } catch (err) { }
+        if (!String(rawText || '').trim()) {
+            rawText = window.prompt('粘贴 LLM 记忆槽 JSON（支持 flat key: script:memory1）', '') || '';
+        }
+        if (!String(rawText || '').trim()) {
+            showToast('未读取到可导入内容', 'warning', 2200);
+            return;
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(rawText);
+        } catch (err) {
+            showToast('导入失败：JSON 格式不正确', 'error', 2600);
+            return;
+        }
+        const sourceSlots = parsed?.llmPromptSlots && typeof parsed.llmPromptSlots === 'object'
+            ? parsed.llmPromptSlots
+            : parsed;
+        const normalizedSlots = normalizeImportedStoryboardPromptSlots(sourceSlots);
+        if (Object.keys(normalizedSlots).length === 0) {
+            showToast('导入失败：未识别到有效记忆槽', 'warning', 2800);
+            return;
+        }
+        const currentSlots = node.settings?.llmPromptSlots && typeof node.settings.llmPromptSlots === 'object'
+            ? node.settings.llmPromptSlots
+            : {};
+        const currentSelection = node.settings?.llmPromptSlotSelection && typeof node.settings.llmPromptSlotSelection === 'object'
+            ? node.settings.llmPromptSlotSelection
+            : {};
+        const incomingSelection = parsed?.llmPromptSlotSelection && typeof parsed.llmPromptSlotSelection === 'object'
+            ? parsed.llmPromptSlotSelection
+            : {};
+        const nextSelection = { ...currentSelection };
+        STORYBOARD_LLM_PROMPT_MODES.forEach((mode) => {
+            const slot = incomingSelection[mode];
+            if (STORYBOARD_PROMPT_SLOT_OPTIONS.some((item) => item.key === slot)) {
+                nextSelection[mode] = slot;
+            }
+        });
+        updateNodeSettings(nodeId, {
+            llmPromptSlots: { ...currentSlots, ...normalizedSlots },
+            llmPromptSlotSelection: nextSelection
+        });
+        showToast(`已导入 ${Object.keys(normalizedSlots).length} 个记忆槽`, 'success', 2600);
+    }, [nodesMap, showToast, updateNodeSettings]);
+    const captureStoryboardWorkspaceHeight = useCallback((nodeId, event) => {
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return;
+        const rawHeight = event?.currentTarget?.offsetHeight ?? event?.currentTarget?.clientHeight;
+        const nextHeight = normalizeStoryboardWorkspaceHeight(rawHeight, STORYBOARD_WORKSPACE_DEFAULT_HEIGHT);
+        const currentHeight = normalizeStoryboardWorkspaceHeight(node.settings?.llmWorkspaceHeight, STORYBOARD_WORKSPACE_DEFAULT_HEIGHT);
+        if (Math.abs(nextHeight - currentHeight) < 1) return;
+        updateNodeSettings(nodeId, { llmWorkspaceHeight: nextHeight });
+    }, [nodesMap, updateNodeSettings]);
 
     const runStoryboardLlmSplit = async (nodeId, mode = 'script') => {
         const node = nodesMap.get(nodeId);
@@ -19990,12 +20682,13 @@ function TapnowApp() {
         if (!node || node.type !== 'storyboard-node') return false;
         const rawText = String(markdownText || '').trim();
         if (!rawText) {
-            showToast('请先输入 Markdown 表格内容', 'warning', 2200);
+            showToast('请先输入表格内容', 'warning', 2200);
             return false;
         }
-        const parsedTable = parseMarkdownTable(rawText);
+        const parsedResult = parseStoryboardTableInput(rawText);
+        const parsedTable = parsedResult?.table || null;
         if (!parsedTable) {
-            showToast('未识别到有效 Markdown 表格', 'warning', 2600);
+            showToast('未识别到有效表格。请确认首行是表头，并使用 Markdown / CSV / TSV（Tab）格式', 'warning', 3600);
             return false;
         }
         const shouldSwitchView = options?.switchToTable !== false;
@@ -20004,9 +20697,32 @@ function TapnowApp() {
             ...patch,
             ...(shouldSwitchView ? { viewMode: 'table' } : {})
         });
-        showToast(`表格导入成功：${parsedTable.rows.length} 行`, 'success', 2200);
+        const formatLabel = parsedResult?.format === 'tsv'
+            ? 'TSV'
+            : parsedResult?.format === 'csv'
+                ? 'CSV'
+                : 'Markdown';
+        showToast(`${formatLabel} 表格导入成功：${parsedTable.rows.length} 行`, 'success', 2400);
         return true;
     }, [buildStoryboardTableSyncPatch, nodesMap, showToast, updateNodeSettings]);
+    const pasteStoryboardTableFromClipboard = useCallback(async (nodeId) => {
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return;
+        if (!navigator?.clipboard?.readText) {
+            showToast('当前环境不支持剪贴板读取，请手动粘贴到 Markdown 输入框', 'warning', 3000);
+            return;
+        }
+        try {
+            const rawText = await navigator.clipboard.readText();
+            if (!String(rawText || '').trim()) {
+                showToast('剪贴板为空', 'warning', 2200);
+                return;
+            }
+            importStoryboardMarkdownTable(nodeId, rawText, { switchToTable: true });
+        } catch (error) {
+            showToast(`读取剪贴板失败: ${error?.message || '未知错误'}`, 'error', 2800);
+        }
+    }, [importStoryboardMarkdownTable, nodesMap, showToast]);
     const importStoryboardTableFromFile = useCallback((nodeId) => {
         const node = nodesMap.get(nodeId);
         if (!node || node.type !== 'storyboard-node') return;
@@ -20034,7 +20750,7 @@ function TapnowApp() {
     }, [importStoryboardMarkdownTable, nodesMap, showToast]);
     const getStoryboardTableDraft = useCallback((node) => {
         const parsed = node?.settings?.tableData
-            || parseMarkdownTable(node?.settings?.tableMarkdown || node?.settings?.scriptText || '');
+            || parseStoryboardTableInput(node?.settings?.tableMarkdown || node?.settings?.scriptText || '')?.table;
         if (parsed && Array.isArray(parsed.headers) && parsed.headers.length > 0) {
             return normalizeStoryboardTableData(parsed);
         }
@@ -20066,6 +20782,79 @@ function TapnowApp() {
         });
         return true;
     }, [buildStoryboardTableSyncPatch, getStoryboardTableDraft, nodesMap, normalizeStoryboardTableData, updateNodeSettings]);
+    const buildStoryboardTablePatchFromShots = useCallback((node) => {
+        if (!node || node.type !== 'storyboard-node') return null;
+        const settings = node.settings || {};
+        if (normalizeStoryboardViewMode(settings.viewMode) === 'table') return null;
+        const hasTableSource = !!(settings.tableData?.headers && settings.tableData.headers.length > 0)
+            || !!String(settings.tableMarkdown || '').trim();
+        if (!hasTableSource) return null;
+        const shots = Array.isArray(settings.shots) ? settings.shots : [];
+        if (shots.length === 0) return null;
+
+        const sourceTable = normalizeStoryboardTableData(
+            settings.tableData
+            || parseStoryboardTableInput(settings.tableMarkdown || '')?.table
+            || { headers: [...STORYBOARD_DEFAULT_TABLE_HEADERS], rows: [] }
+        );
+        let headers = [...sourceTable.headers];
+        let rows = sourceTable.rows.map((row) => headers.map((_, colIdx) => String(Array.isArray(row) ? (row[colIdx] ?? '') : '')));
+        let shotColumnIndex = getStoryboardTableShotColumnIndex(headers);
+        if (shotColumnIndex < 0) {
+            headers = ['场次镜号', ...headers];
+            rows = rows.map((row, rowIdx) => [String(rowIdx + 1), ...row]);
+            shotColumnIndex = 0;
+        }
+        const promptColumnIndex = getStoryboardTablePromptColumnIndex(headers);
+        const descriptionColumnIndex = getStoryboardTableDescriptionColumnIndex(headers);
+        const rowBySceneIndex = new Map();
+        rows.forEach((row, rowIdx) => {
+            const sceneIndex = normalizeStoryboardSceneIndex(row[shotColumnIndex], rowIdx + 1);
+            if (!rowBySceneIndex.has(sceneIndex)) {
+                rowBySceneIndex.set(sceneIndex, row);
+            }
+        });
+        const nextRows = shots.map((shot, rowIdx) => {
+            const sceneIndex = normalizeStoryboardSceneIndex(shot?.scene_index, rowIdx + 1);
+            const seedRow = rowBySceneIndex.get(sceneIndex) || rows[rowIdx] || headers.map(() => '');
+            const nextRow = headers.map((_, colIdx) => String(Array.isArray(seedRow) ? (seedRow[colIdx] ?? '') : ''));
+            nextRow[shotColumnIndex] = String(sceneIndex);
+            if (promptColumnIndex >= 0) {
+                nextRow[promptColumnIndex] = String(shot?.prompt ?? '');
+            }
+            if (descriptionColumnIndex >= 0) {
+                nextRow[descriptionColumnIndex] = String(shot?.description ?? '');
+            }
+            return nextRow;
+        });
+        const finalTable = normalizeStoryboardTableData({ headers, rows: nextRows });
+        const nextMarkdown = stringifyMarkdownTable(finalTable);
+        const currentMarkdown = stringifyMarkdownTable(sourceTable);
+        if (currentMarkdown === nextMarkdown) return null;
+        return {
+            tableData: finalTable,
+            tableMarkdown: nextMarkdown
+        };
+    }, [normalizeStoryboardTableData]);
+    useEffect(() => {
+        setNodes((prevNodes) => {
+            let changed = false;
+            const nextNodes = prevNodes.map((node) => {
+                if (!node || node.type !== 'storyboard-node') return node;
+                const patch = buildStoryboardTablePatchFromShots(node);
+                if (!patch) return node;
+                changed = true;
+                return {
+                    ...node,
+                    settings: {
+                        ...node.settings,
+                        ...patch
+                    }
+                };
+            });
+            return changed ? nextNodes : prevNodes;
+        });
+    }, [buildStoryboardTablePatchFromShots]);
     const closeStoryboardTableCellEditor = useCallback(() => {
         setStoryboardTableCellEditor({
             visible: false,
@@ -20212,7 +21001,13 @@ function TapnowApp() {
             }
 
             const currentShot = (node.settings?.shots || []).find(s => isSameShotId(s.id, shotId));
+            if (!currentShot) {
+                console.warn(`[updateShot] 镜头未找到:`, { nodeId, shotId });
+                return prevNodes;
+            }
             const finalUpdates = { ...updates };
+            const skipOutputHistory = !!finalUpdates.__skipOutputHistory;
+            delete finalUpdates.__skipOutputHistory;
             const hasDurationCost = Object.prototype.hasOwnProperty.call(finalUpdates, 'durationCost');
             const finishingStatuses = new Set(['done', 'completed', 'failed', 'error']);
 
@@ -20226,12 +21021,48 @@ function TapnowApp() {
                     finalUpdates.durationCost = Number(elapsedSeconds.toFixed(1));
                 }
             }
+            const hasOutputPayload = ['output_images', 'output_url', 'video_url'].some((key) =>
+                Object.prototype.hasOwnProperty.call(finalUpdates, key)
+            );
+            if (hasOutputPayload && !skipOutputHistory) {
+                const beforeSnapshot = normalizeStoryboardOutputSnapshot(currentShot);
+                const afterSnapshot = normalizeStoryboardOutputSnapshot({ ...currentShot, ...finalUpdates });
+                if (afterSnapshot && !isSameStoryboardOutputSnapshot(beforeSnapshot, afterSnapshot)) {
+                    const previousHistory = Array.isArray(currentShot.outputHistory)
+                        ? currentShot.outputHistory.filter(Boolean)
+                        : [];
+                    const normalizedPreviousHistory = [...previousHistory];
+                    if (normalizedPreviousHistory.length === 0 && beforeSnapshot) {
+                        normalizedPreviousHistory.push({
+                            ...beforeSnapshot,
+                            id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-prev`,
+                            createdAt: Date.now(),
+                            sourceTaskId: String(options.sourceTaskId || 'legacy')
+                        });
+                    }
+                    const nextEntry = {
+                        ...afterSnapshot,
+                        id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                        createdAt: Date.now(),
+                        sourceTaskId: String(options.sourceTaskId || '')
+                    };
+                    const tail = normalizedPreviousHistory.length > 0 ? normalizedPreviousHistory[normalizedPreviousHistory.length - 1] : null;
+                    const mergedHistory = (!tail || !isSameStoryboardOutputSnapshot(tail, nextEntry))
+                        ? [...normalizedPreviousHistory, nextEntry]
+                        : normalizedPreviousHistory;
+                    if (mergedHistory.length > MAX_STORYBOARD_OUTPUT_HISTORY) {
+                        mergedHistory.splice(0, mergedHistory.length - MAX_STORYBOARD_OUTPUT_HISTORY);
+                    }
+                    finalUpdates.outputHistory = mergedHistory;
+                    finalUpdates.outputHistoryCursor = mergedHistory.length - 1;
+                }
+            }
 
             didUpdate = true;
             statusForTimer = finalUpdates.status;
 
             const updatedShots = (node.settings?.shots || []).map(shot =>
-                shot.id === shotId ? { ...shot, ...finalUpdates } : shot
+                isSameShotId(shot.id, shotId) ? { ...shot, ...finalUpdates } : shot
             );
 
             // [Cleaned Log] updateShot info removed
@@ -20271,6 +21102,56 @@ function TapnowApp() {
             }, 50);
         }
     };
+    const focusStoryboardShotCard = useCallback((nodeId, shotId) => {
+        const selector = `[data-storyboard-shot-key="${makeStoryboardShotFocusKey(nodeId, shotId)}"]`;
+        requestAnimationFrame(() => {
+            const target = document.querySelector(selector);
+            if (target && typeof target.focus === 'function') {
+                target.focus();
+            }
+        });
+    }, []);
+    const navigateStoryboardShotByDelta = useCallback((nodeId, shotId, delta) => {
+        if (!delta) return null;
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return null;
+        const shots = node.settings?.shots || [];
+        if (!shots.length) return null;
+        const currentIdx = shots.findIndex((s) => isSameShotId(s.id, shotId));
+        if (currentIdx < 0) return null;
+        const nextIdx = Math.max(0, Math.min(shots.length - 1, currentIdx + delta));
+        const targetShot = shots[nextIdx];
+        if (!targetShot || isSameShotId(targetShot.id, shotId)) return targetShot || null;
+        setActiveShot({ nodeId, shotId: targetShot.id });
+        focusStoryboardShotCard(nodeId, targetShot.id);
+        return targetShot;
+    }, [nodesMap, focusStoryboardShotCard]);
+    const switchStoryboardShotOutputHistory = useCallback((nodeId, shotId, delta) => {
+        if (!delta) return;
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'storyboard-node') return;
+        const shots = node.settings?.shots || [];
+        const shot = shots.find((item) => isSameShotId(item.id, shotId));
+        if (!shot) return;
+        const historyEntries = Array.isArray(shot.outputHistory) ? shot.outputHistory.filter(Boolean) : [];
+        if (historyEntries.length <= 1) return;
+        const currentCursorRaw = Number.isInteger(shot.outputHistoryCursor)
+            ? shot.outputHistoryCursor
+            : historyEntries.length - 1;
+        const currentCursor = Math.max(0, Math.min(historyEntries.length - 1, currentCursorRaw));
+        const nextCursor = Math.max(0, Math.min(historyEntries.length - 1, currentCursor + delta));
+        if (nextCursor === currentCursor) return;
+        const snapshot = historyEntries[nextCursor];
+        const restored = materializeStoryboardOutputFromSnapshot(snapshot, shot);
+        if (!restored) return;
+        setActiveShot({ nodeId, shotId: shot.id });
+        focusStoryboardShotCard(nodeId, shot.id);
+        updateShot(nodeId, shot.id, {
+            ...restored,
+            outputHistoryCursor: nextCursor,
+            __skipOutputHistory: true
+        });
+    }, [nodesMap, focusStoryboardShotCard]);
 
     // 从 video-analyze 节点导入分析结果
     const importShotsFromAnalysis = (nodeId) => {
@@ -20518,7 +21399,16 @@ function TapnowApp() {
                 return;
             }
             const shot = resolved.shot;
-            if (Array.isArray(shot.output_images) && shot.output_images.length > 0) {
+            const shotHasOutput = Array.isArray(shot.output_images) && shot.output_images.length > 0;
+            const historyStartTime = Number(item.startTime || item.time || 0);
+            const shotStartTime = Number(shot.generationStartTime || 0);
+            const isLikelyCurrentRun = shot.status === 'generating'
+                || (
+                    historyStartTime > 0
+                    && shotStartTime > 0
+                    && Math.abs(historyStartTime - shotStartTime) <= 2 * 60 * 1000
+                );
+            if (shotHasOutput && !isLikelyCurrentRun) {
                 synced.add(item.id);
                 return;
             }
@@ -24346,6 +25236,14 @@ ${inputText.substring(0, 15000)} ... (截断)
         }
         return cache;
     }, [selectedNodeId, selectedNodeIds, getAdjacentNodes]);
+    const resolveNodeRenderZIndex = useCallback((nodeId, dragging = false, selected = false) => {
+        const order = nodeSelectionPriority[nodeId];
+        const base = Number.isFinite(order)
+            ? 1000 + order
+            : 100;
+        const selectedBoost = selected ? 2000 : 0;
+        return dragging ? base + selectedBoost + 5000 : (base + selectedBoost);
+    }, [nodeSelectionPriority]);
 
     // NodeItem 组件：提取节点渲染逻辑，使用 React.memo 优化
     // 注意：由于 renderNode 的 JSX 内容非常长（约 2700 行），完整提取需要大量工作
@@ -24368,6 +25266,11 @@ ${inputText.substring(0, 15000)} ... (截断)
         const isConnected = nodeConnectedStatus.get(node.id) || false;
         // 判断节点是否正在被拖动（包括多选拖动），用于提升 z-index 避免被遮挡
         const isDragging = dragNodeId === node.id || (dragNodeId && selectedNodeIds.has(node.id));
+        const nodeZIndex = resolveNodeRenderZIndex(node.id, !!isDragging, !!isSelected);
+        const inputImageDisplayContent = node.type === 'input-image'
+            ? String(node.content || connectedImages[0] || '')
+            : String(node.content || '');
+        const hasLinkedInputImage = node.type === 'input-image' && !node.content && !!inputImageDisplayContent;
 
         // 功能3：检查是否为相邻节点（当有节点被选中时）- 使用缓存的相邻节点集合
         const selectedId = selectedNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
@@ -24401,7 +25304,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                         width: node.width,
                         height: node.height,
                         cursor: (dragNodeId === node.id || (dragNodeId && selectedNodeIds.has(node.id))) ? 'grabbing' : 'default',
-                        zIndex: isDragging ? 50 : 10, // 拖动时提升 z-index，避免被其他节点遮挡
+                        zIndex: nodeZIndex,
                         border: `1px solid ${theme === 'dark' ? '#3f3f46' : theme === 'solarized' ? '#eee8d5' : '#e4e4e7'}`,
                         background: theme === 'dark' ? '#18181b' : theme === 'solarized' ? '#eee8d5' : '#fff',
                         boxShadow: 'none',
@@ -24415,6 +25318,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                         if (e.button !== 0 || e.target === e.currentTarget) return;
                         const interactive = e.target.closest('input, textarea, select, button, a, [contenteditable="true"]');
                         if (!interactive) return;
+                        touchNodeSelectionPriority(node.id);
                         if (e.nativeEvent) e.nativeEvent.__tapnowSelectionHandled = true;
                         if (e.ctrlKey || e.metaKey) {
                             setSelectedNodeIds(prev => {
@@ -24444,6 +25348,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                     onMouseDown={(e) => {
                         if (e.nativeEvent?.__tapnowSelectionHandled) return;
                         if (e.button === 0) {
+                            touchNodeSelectionPriority(node.id);
                             e.stopPropagation();
                             markInteraction('node');
                             if (e.ctrlKey || e.metaKey) {
@@ -24470,6 +25375,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     setSelectedNodeIds(new Set([node.id]));
                                 }
                             }
+                            const dragNodeIds = (selectedNodeIds.size > 1 && selectedNodeIds.has(node.id))
+                                ? Array.from(selectedNodeIds)
+                                : [node.id];
+                            const orderedDragNodeIds = [
+                                ...dragNodeIds.filter((id) => id !== node.id),
+                                node.id
+                            ];
+                            dragPriorityNodeIdsRef.current = orderedDragNodeIds;
                             setDragNodeId(node.id);
                         }
                     }}
@@ -24478,18 +25391,18 @@ ${inputText.substring(0, 15000)} ... (截断)
                     onMouseUp={(e) => handleNodeMouseUp(node.id, e)}
                 >
                     {/* 仅显示核心图片/视频 */}
-                    {node.type === 'input-image' && node.content && (
+                    {node.type === 'input-image' && inputImageDisplayContent && (
                         <div className="w-full h-full relative">
-                            {isVideoUrl(node.content) ? (
+                            {isVideoUrl(inputImageDisplayContent) ? (
                                 <ResolvedVideo
-                                    src={node.content}
+                                    src={inputImageDisplayContent}
                                     className="w-full h-full object-cover opacity-80"
                                     muted
                                     playsInline
                                 />
                             ) : (
                                 <LazyBase64Image
-                                    src={node.content}
+                                    src={inputImageDisplayContent}
                                     className="w-full h-full object-cover opacity-80"
                                     alt=""
                                 />
@@ -24504,7 +25417,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                             playsInline
                         />
                     )}
-                    {!node.content && (
+                    {!(node.type === 'input-image' ? inputImageDisplayContent : node.content) && (
                         <div className={`p-2 font-bold text-sm truncate ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>
                             {node.type === 'input-image' ? '图片' :
                                 node.type === 'video-input' ? '视频' :
@@ -24663,7 +25576,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                     width: node.width,
                     height: node.height,
                     cursor: (dragNodeId === node.id || (dragNodeId && selectedNodeIds.has(node.id))) ? 'grabbing' : 'default',
-                    zIndex: isDragging ? 50 : 10, // 拖动时提升 z-index，避免被其他节点遮挡
+                    zIndex: nodeZIndex,
                     WebkitFontSmoothing: 'antialiased',
                     MozOsxFontSmoothing: 'grayscale',
                     textRendering: 'optimizeLegibility',
@@ -24676,6 +25589,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                     if (e.button !== 0 || e.target === e.currentTarget) return;
                     const interactive = e.target.closest('input, textarea, select, button, a, [contenteditable="true"]');
                     if (!interactive) return;
+                    touchNodeSelectionPriority(node.id);
                     if (e.nativeEvent) e.nativeEvent.__tapnowSelectionHandled = true;
                     if (e.ctrlKey || e.metaKey) {
                         setSelectedNodeIds(prev => {
@@ -24705,6 +25619,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                 onMouseDown={(e) => {
                     if (e.nativeEvent?.__tapnowSelectionHandled) return;
                     if (e.button === 0) {
+                        touchNodeSelectionPriority(node.id);
                         e.stopPropagation();
                         markInteraction('node');
                         // 如果按住了Ctrl键，添加到多选
@@ -24737,6 +25652,14 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 setSelectedNodeIds(new Set([node.id]));
                             }
                         }
+                        const dragNodeIds = (selectedNodeIds.size > 1 && selectedNodeIds.has(node.id))
+                            ? Array.from(selectedNodeIds)
+                            : [node.id];
+                        const orderedDragNodeIds = [
+                            ...dragNodeIds.filter((id) => id !== node.id),
+                            node.id
+                        ];
+                        dragPriorityNodeIdsRef.current = orderedDragNodeIds;
                         setDragNodeId(node.id);
                         setActiveDropdown(null);
                     }
@@ -24749,8 +25672,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                     e.stopPropagation();
 
                     // 功能6：双击图片或视频节点显示预览弹窗
-                    if ((node.type === 'input-image' || node.type === 'video-input') && node.content) {
-                        setLightboxItem({ url: node.content, type: isVideoUrl(node.content) ? 'video' : 'image' });
+                    const previewUrl = node.type === 'input-image'
+                        ? inputImageDisplayContent
+                        : node.content;
+                    if ((node.type === 'input-image' || node.type === 'video-input') && previewUrl) {
+                        setLightboxItem({ url: previewUrl, type: isVideoUrl(previewUrl) ? 'video' : 'image' });
                     }
                 }}
             >
@@ -26301,11 +27227,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                             onDragLeave={handleDragLeave}
                             onContextMenu={(e) => handleInputImageRightClick(e, node.id)}
                         >
-                            {node.content ? (
+                            {inputImageDisplayContent ? (
                                 <div className="relative w-full h-full">
-                                    {isVideoUrl(node.content) ? (
+                                    {isVideoUrl(inputImageDisplayContent) ? (
                                         <ResolvedVideo
-                                            src={node.content}
+                                            src={inputImageDisplayContent}
                                             controls
                                             className={`w-full h-full object-contain ${theme === 'dark'
                                                 ? 'bg-black/50'
@@ -26324,7 +27250,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         />
                                     ) : (
                                         <LazyBase64Image
-                                            src={node.content}
+                                            src={inputImageDisplayContent}
                                             className={`w-full h-full object-contain ${theme === 'dark'
                                                 ? 'bg-black/50'
                                                 : theme === 'solarized'
@@ -26352,6 +27278,17 @@ ${inputText.substring(0, 15000)} ... (截断)
                                             {node.dimensions.w}x{node.dimensions.h}
                                         </div>
                                     )}
+                                    {hasLinkedInputImage && (
+                                        <div
+                                            className={`absolute top-2 left-2 text-[10px] px-1.5 py-0.5 rounded backdrop-blur-sm border ${theme === 'dark'
+                                                ? 'bg-blue-500/20 text-blue-200 border-blue-300/30'
+                                                : 'bg-blue-50/90 text-blue-600 border-blue-200'
+                                                }`}
+                                            title={t('显示的是上游连接图片')}
+                                        >
+                                            {t('上游引用')}
+                                        </div>
+                                    )}
                                     {/* 悬浮菜单：当 isMasking 为 true 时强制隐藏 */}
                                     {!node.isMasking && (
                                         <div className="absolute inset-0 bg-black/40 transition-opacity gap-2 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center">
@@ -26365,7 +27302,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 >
                                                     {t('更换')} <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(node.id, e)} />
                                                 </label>
-                                                {!isVideoUrl(node.content) && (
+                                                {!isVideoUrl(inputImageDisplayContent) && (
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -26417,10 +27354,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                         />
                                     )}
                                     {/* MaskEditor 组件 */}
-                                    {node.isMasking && !isVideoUrl(node.content) && (
+                                    {node.isMasking && !isVideoUrl(inputImageDisplayContent) && (
                                         <MaskEditor
                                             nodeId={node.id}
-                                            imageUrl={node.content}
+                                            imageUrl={inputImageDisplayContent}
                                             imageDimensions={node.dimensions}
                                             isActive={node.isMasking}
                                             onClose={() => {
@@ -28378,7 +29315,10 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                     placeholder={t('程序拆分格式： # 1  第一个镜头描述 # 2 第二个镜头描述 或者直接描述换行也可识别')}
                                                     maxLength={10000}
                                                     className={`w-full min-h-[6rem] max-h-[18rem] p-2 text-xs rounded border resize-y overflow-y-auto custom-scrollbar ${theme === 'dark' ? 'bg-zinc-800 border-zinc-700 text-zinc-200 placeholder-zinc-500' : theme === 'solarized' ? 'bg-[#fdf6e3] border-[#eee8d5] text-zinc-800 placeholder-zinc-400' : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400'}`}
+                                                    style={{ height: `${normalizeStoryboardWorkspaceHeight(node.settings?.llmWorkspaceHeight, STORYBOARD_WORKSPACE_DEFAULT_HEIGHT)}px` }}
                                                     onMouseDown={(e) => e.stopPropagation()}
+                                                    onMouseUp={(e) => captureStoryboardWorkspaceHeight(node.id, e)}
+                                                    onBlur={(e) => captureStoryboardWorkspaceHeight(node.id, e)}
                                                     onWheel={(e) => { e.stopPropagation(); }}
                                                 />
                                                 <div className="text-right text-[10px] text-zinc-500">
@@ -28469,7 +29409,13 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 scriptExpanded: false // Collapse after split
                                                             });
                                                         }}
-                                                        className={`px-3 py-1.5 text-xs rounded transition-colors ${storyboardPrimaryButtonClass}`}
+                                                        className={`px-3 py-1.5 text-xs rounded transition-colors ${node.settings?.showLlmPromptEditor
+                                                            ? (theme === 'dark'
+                                                                ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                                                : theme === 'solarized'
+                                                                    ? 'bg-[#fdf6e3] text-zinc-600 hover:bg-[#eee8d5]'
+                                                                    : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300')
+                                                            : storyboardPrimaryButtonClass}`}
                                                         onMouseDown={(e) => e.stopPropagation()}
                                                     >
                                                         {t('程序拆分')}
@@ -28480,6 +29426,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             : 'script';
                                                         const isPromptEditorMode = !!node.settings?.showLlmPromptEditor;
                                                         const isTablePromptEditorMode = isPromptEditorMode && llmPromptMode === STORYBOARD_TABLE_PROMPT_MODE;
+                                                        const workspaceHeight = normalizeStoryboardWorkspaceHeight(node.settings?.llmWorkspaceHeight, STORYBOARD_WORKSPACE_DEFAULT_HEIGHT);
                                                         const activePromptText = getStoryboardPromptTemplate(llmPromptMode, node.settings || {});
                                                         const activePromptSlot = getStoryboardPromptSlotKey(llmPromptMode, node.settings || {});
                                                         const activeSlotConfig = STORYBOARD_PROMPT_SLOT_OPTIONS.find((item) => item.key === activePromptSlot) || STORYBOARD_PROMPT_SLOT_OPTIONS[0];
@@ -28604,6 +29551,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     {t('LLM分镜提示词汇总')}
                                                                 </button>
                                                                 {isPromptEditorMode && (
+                                                                    <>
                                                                     <div className="flex items-start gap-2 mt-2 w-full">
                                                                         <div className="w-[78px] shrink-0 flex flex-col gap-1">
                                                                             {STORYBOARD_PROMPT_SLOT_OPTIONS.map((slot) => {
@@ -28652,14 +29600,52 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             className={`flex-1 text-xs p-2 rounded resize-y min-h-[5rem] max-h-[20rem] overflow-y-auto custom-scrollbar ${theme === 'dark'
                                                                                 ? 'bg-zinc-800 text-zinc-200 border-zinc-700'
                                                                                 : theme === 'solarized' ? 'bg-[#fdf6e3] text-zinc-800 border-[#eee8d5]' : 'bg-white text-zinc-800 border-zinc-300'} border`}
+                                                                            style={{ height: `${workspaceHeight}px` }}
                                                                             rows={3}
                                                                             placeholder={activeSlotConfig.editable ? t('输入记忆 Prompt（该标签专属）...') : t('默认 Prompt 为只读')}
                                                                             onMouseDown={(e) => e.stopPropagation()}
                                                                             onClick={(e) => e.stopPropagation()}
                                                                             onKeyDown={(e) => e.stopPropagation()}
+                                                                            onMouseUp={(e) => captureStoryboardWorkspaceHeight(node.id, e)}
+                                                                            onBlur={(e) => captureStoryboardWorkspaceHeight(node.id, e)}
                                                                             onWheel={(e) => { e.stopPropagation(); }}
                                                                         />
                                                                     </div>
+                                                                    <div className="flex items-center justify-end gap-1 mt-1 pl-[80px]">
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                exportStoryboardPromptSlots(node.id);
+                                                                            }}
+                                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                                            className={`px-2 py-1 text-[10px] rounded border transition-colors ${theme === 'dark'
+                                                                                ? 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+                                                                                : theme === 'solarized'
+                                                                                    ? 'border-[#d7cfb2] text-zinc-700 hover:bg-[#eee8d5]'
+                                                                                    : 'border-zinc-300 text-zinc-700 hover:bg-white'
+                                                                                }`}
+                                                                            title={t('导出当前分镜记忆槽 JSON')}
+                                                                        >
+                                                                            {t('导出记忆槽')}
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                importStoryboardPromptSlots(node.id);
+                                                                            }}
+                                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                                            className={`px-2 py-1 text-[10px] rounded border transition-colors ${theme === 'dark'
+                                                                                ? 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+                                                                                : theme === 'solarized'
+                                                                                    ? 'border-[#d7cfb2] text-zinc-700 hover:bg-[#eee8d5]'
+                                                                                    : 'border-zinc-300 text-zinc-700 hover:bg-white'
+                                                                                }`}
+                                                                            title={t('导入分镜记忆槽 JSON')}
+                                                                        >
+                                                                            {t('导入记忆槽')}
+                                                                        </button>
+                                                                    </div>
+                                                                    </>
                                                                 )}
                                                             </>
                                                         );
@@ -28733,6 +29719,22 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                             }`}
                                                                     >
                                                                         {t('应用')}
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            pasteStoryboardTableFromClipboard(node.id);
+                                                                        }}
+                                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                                        className={`px-2 py-1 text-[10px] rounded border transition-colors ${theme === 'dark'
+                                                                            ? 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+                                                                            : theme === 'solarized'
+                                                                                ? 'border-[#d7cfb2] text-zinc-700 hover:bg-[#eee8d5]'
+                                                                                : 'border-zinc-300 text-zinc-700 hover:bg-white'
+                                                                            }`}
+                                                                        title={t('从剪贴板批量粘贴表格（Markdown/CSV/TSV）')}
+                                                                    >
+                                                                        {t('批量粘贴')}
                                                                     </button>
                                                                     <button
                                                                         onClick={(e) => {
@@ -28987,6 +29989,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         <div className="flex items-stretch gap-2 w-full">
                                                             <div
                                                                 // key={shot.id} // moved to Fragment
+                                                                data-storyboard-shot-key={makeStoryboardShotFocusKey(node.id, shot.id)}
                                                                 tabIndex={0} // 允许聚焦以响应键盘事件
                                                                 onClick={(e) => {
                                                                     e.stopPropagation(); // 防止触发节点选择
@@ -28994,6 +29997,33 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     e.currentTarget.focus(); // 关键：点击行即聚焦，激活粘贴
                                                                 }}
                                                                 onPaste={(e) => handleShotPaste(e, shot.id)} // 关键：在行级别监听粘贴
+                                                                onKeyDown={(e) => {
+                                                                    const interactive = e.target.closest('textarea, input, select, [contenteditable="true"]');
+                                                                    if (interactive && interactive !== e.currentTarget) return;
+                                                                    if (e.key === 'ArrowLeft') {
+                                                                        e.preventDefault();
+                                                                        e.stopPropagation();
+                                                                        switchStoryboardShotOutputHistory(node.id, shot.id, -1);
+                                                                        return;
+                                                                    }
+                                                                    if (e.key === 'ArrowRight') {
+                                                                        e.preventDefault();
+                                                                        e.stopPropagation();
+                                                                        switchStoryboardShotOutputHistory(node.id, shot.id, 1);
+                                                                        return;
+                                                                    }
+                                                                    if (e.key === 'ArrowUp') {
+                                                                        e.preventDefault();
+                                                                        e.stopPropagation();
+                                                                        navigateStoryboardShotByDelta(node.id, shot.id, -1);
+                                                                        return;
+                                                                    }
+                                                                    if (e.key === 'ArrowDown') {
+                                                                        e.preventDefault();
+                                                                        e.stopPropagation();
+                                                                        navigateStoryboardShotByDelta(node.id, shot.id, 1);
+                                                                    }
+                                                                }}
                                                                 className={`relative flex-1 flex gap-3 p-3 rounded-lg border transition-all group/shot cursor-pointer outline-none focus:ring-2 focus:ring-blue-500/50 ${isActiveShot
                                                                     ? 'border-blue-500 ring-1 ring-blue-500 bg-blue-500/5 z-10'
                                                                     : theme === 'dark'
@@ -29892,15 +30922,106 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         >
                                                                             {shot.outputEnabled && <Check size={10} />}
                                                                         </div>
-                                                                        <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
-                                                                            {shot.output_images?.length > 0 ? '已就绪' : '等待'}
-                                                                        </span>
+                                                                        {(() => {
+                                                                            const outputHistoryEntries = Array.isArray(shot.outputHistory) ? shot.outputHistory.filter(Boolean) : [];
+                                                                            const outputHistoryCount = outputHistoryEntries.length;
+                                                                            const outputHistoryCursorRaw = Number.isInteger(shot.outputHistoryCursor)
+                                                                                ? shot.outputHistoryCursor
+                                                                                : (outputHistoryCount > 0 ? outputHistoryCount - 1 : -1);
+                                                                            const outputHistoryCursor = outputHistoryCount > 0
+                                                                                ? Math.max(0, Math.min(outputHistoryCount - 1, outputHistoryCursorRaw))
+                                                                                : -1;
+                                                                            const activeHistorySnapshot = outputHistoryCursor >= 0
+                                                                                ? outputHistoryEntries[outputHistoryCursor]
+                                                                                : null;
+                                                                            const snapshotMaterialized = materializeStoryboardOutputFromSnapshot(activeHistorySnapshot, shot);
+                                                                            const outputImages = Array.isArray(snapshotMaterialized?.output_images)
+                                                                                ? snapshotMaterialized.output_images
+                                                                                : (shot.output_images || []);
+                                                                            const fallbackOutputUrl = String(snapshotMaterialized?.output_url || shot.output_url || '').trim();
+                                                                            const explicitVideoUrl = String(snapshotMaterialized?.video_url || shot.video_url || '').trim();
+                                                                            const previewVideoUrl = explicitVideoUrl || (isVideoUrl(fallbackOutputUrl) ? fallbackOutputUrl : '');
+                                                                            const hasReadyOutput = !!previewVideoUrl || outputImages.length > 0 || (!!fallbackOutputUrl && !isVideoUrl(fallbackOutputUrl));
+                                                                            const canSwitchHistory = outputHistoryCount > 1;
+                                                                            const disablePrev = !canSwitchHistory || outputHistoryCursor <= 0;
+                                                                            const disableNext = !canSwitchHistory || outputHistoryCursor >= (outputHistoryCount - 1);
+                                                                            return (
+                                                                                <div className="flex items-center gap-1.5">
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={(e) => {
+                                                                                            e.stopPropagation();
+                                                                                            switchStoryboardShotOutputHistory(node.id, shot.id, -1);
+                                                                                        }}
+                                                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                                                        disabled={disablePrev}
+                                                                                        className={`p-0.5 rounded transition-colors ${disablePrev
+                                                                                            ? 'opacity-30 cursor-not-allowed'
+                                                                                            : (theme === 'dark'
+                                                                                                ? 'text-zinc-300 hover:text-blue-300 hover:bg-zinc-800'
+                                                                                                : 'text-zinc-600 hover:text-blue-700 hover:bg-zinc-100')
+                                                                                            }`}
+                                                                                        title={t('上一版')}
+                                                                                    >
+                                                                                        <ChevronLeft size={13} />
+                                                                                    </button>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={(e) => {
+                                                                                            e.stopPropagation();
+                                                                                            switchStoryboardShotOutputHistory(node.id, shot.id, 1);
+                                                                                        }}
+                                                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                                                        disabled={disableNext}
+                                                                                        className={`p-0.5 rounded transition-colors ${disableNext
+                                                                                            ? 'opacity-30 cursor-not-allowed'
+                                                                                            : (theme === 'dark'
+                                                                                                ? 'text-zinc-300 hover:text-blue-300 hover:bg-zinc-800'
+                                                                                                : 'text-zinc-600 hover:text-blue-700 hover:bg-zinc-100')
+                                                                                            }`}
+                                                                                        title={t('下一版')}
+                                                                                    >
+                                                                                        <ChevronRight size={13} />
+                                                                                    </button>
+                                                                                    <span className={`text-[10px] font-mono min-w-[2.6rem] text-center ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                                                                        {canSwitchHistory ? `${outputHistoryCursor + 1}/${outputHistoryCount}` : '-'}
+                                                                                    </span>
+                                                                                    <span className={`text-[10px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-400'}`}>
+                                                                                        {hasReadyOutput ? '已就绪' : '等待'}
+                                                                                    </span>
+                                                                                </div>
+                                                                            );
+                                                                        })()}
                                                                     </div>
                                                                     {/* 4-Image Grid or Single Thumbnail */}
                                                                     {(() => {
-                                                                        const outputImages = shot.output_images || [];
-                                                                        const selectedIndex = shot.selectedImageIndex ?? 0;
-                                                                        const mode = normalizeStoryboardMode(node.settings?.mode);
+                                                                        const outputHistoryEntries = Array.isArray(shot.outputHistory) ? shot.outputHistory.filter(Boolean) : [];
+                                                                        const outputHistoryCount = outputHistoryEntries.length;
+                                                                        const outputHistoryCursorRaw = Number.isInteger(shot.outputHistoryCursor)
+                                                                            ? shot.outputHistoryCursor
+                                                                            : (outputHistoryCount > 0 ? outputHistoryCount - 1 : -1);
+                                                                        const outputHistoryCursor = outputHistoryCount > 0
+                                                                            ? Math.max(0, Math.min(outputHistoryCount - 1, outputHistoryCursorRaw))
+                                                                            : -1;
+                                                                        const activeHistorySnapshot = outputHistoryCursor >= 0
+                                                                            ? outputHistoryEntries[outputHistoryCursor]
+                                                                            : null;
+                                                                        const snapshotMaterialized = materializeStoryboardOutputFromSnapshot(activeHistorySnapshot, shot);
+                                                                        const outputImages = Array.isArray(snapshotMaterialized?.output_images)
+                                                                            ? snapshotMaterialized.output_images
+                                                                            : (shot.output_images || []);
+                                                                        const selectedIndex = Number.isInteger(shot.selectedImageIndex)
+                                                                            ? shot.selectedImageIndex
+                                                                            : (Number.isInteger(snapshotMaterialized?.selectedImageIndex)
+                                                                                ? snapshotMaterialized.selectedImageIndex
+                                                                                : 0);
+                                                                        const fallbackOutputUrl = String(snapshotMaterialized?.output_url || shot.output_url || '').trim();
+                                                                        const explicitVideoUrl = String(snapshotMaterialized?.video_url || shot.video_url || '').trim();
+                                                                        const previewVideoUrl = explicitVideoUrl || (isVideoUrl(fallbackOutputUrl) ? fallbackOutputUrl : '');
+                                                                        const configuredMode = normalizeStoryboardMode(node.settings?.mode);
+                                                                        const mode = (activeHistorySnapshot?.mode === 'video' || previewVideoUrl || configuredMode === 'video')
+                                                                            ? 'video'
+                                                                            : 'image';
                                                                         const getPreviewBgClass = (index) => theme === 'solarized'
                                                                             ? (index % 2 === 0 ? 'bg-[#fdf6e3]' : 'bg-[#eee8d5]')
                                                                             : '';
@@ -29917,17 +31038,17 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         }`}
                                                                                     onClick={(e) => {
                                                                                         e.stopPropagation();
-                                                                                        if (shot.video_url) setLightboxItem({ url: shot.video_url, type: 'video', prompt: shot.prompt });
+                                                                                        if (previewVideoUrl) setLightboxItem({ url: previewVideoUrl, type: 'video', prompt: shot.prompt });
                                                                                     }}
                                                                                 >
-                                                                                    {shot.video_url ? (
-                                                                                        <video src={shot.video_url} className="w-full h-full object-cover" muted />
+                                                                                    {previewVideoUrl ? (
+                                                                                        <video src={previewVideoUrl} className="w-full h-full object-cover" muted />
                                                                                     ) : (
                                                                                         <div className="absolute inset-0 flex items-center justify-center opacity-30">
                                                                                             <Eye size={16} />
                                                                                         </div>
                                                                                     )}
-                                                                                    {shot.video_url && (
+                                                                                    {previewVideoUrl && (
                                                                                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/preview:opacity-100 flex items-center justify-center transition-opacity">
                                                                                             <Maximize2 size={16} className="text-white drop-shadow-md" />
                                                                                         </div>
@@ -29961,7 +31082,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                             className={`relative flex-1 rounded border overflow-hidden transition-all group/main ${hasSelection ? 'border-blue-500 ring-1 ring-blue-500/50' : (theme === 'dark' ? 'border-zinc-700' : 'border-zinc-300')} ${theme === 'solarized' ? getPreviewBgClass(displayMainIndex) : ''} ${isLocked ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'}`}
                                                                                             onClick={(e) => {
                                                                                                 e.stopPropagation();
-                                                                                                if (!isLocked) updateShot(node.id, shot.id, { selectedImageIndex: hasSelection ? -1 : displayMainIndex });
+                                                                                                if (!isLocked && !hasSelection) {
+                                                                                                    updateShot(node.id, shot.id, { selectedImageIndex: displayMainIndex });
+                                                                                                }
                                                                                             }}
                                                                                             onDoubleClick={(e) => {
                                                                                                 e.stopPropagation();
@@ -30027,6 +31150,17 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                     key={idx}
                                                                                                     className={`relative flex-1 rounded border overflow-hidden transition-all group/thumb ${theme === 'dark' ? 'border-zinc-700' : 'border-zinc-300'} ${theme === 'solarized' ? getPreviewBgClass(idx) : ''} ${isLocked ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-blue-400'}`}
                                                                                                     onClick={(e) => { e.stopPropagation(); if (!isLocked) updateShot(node.id, shot.id, { selectedImageIndex: idx }); }}
+                                                                                                    onDoubleClick={(e) => {
+                                                                                                        e.stopPropagation();
+                                                                                                        setLightboxItem({
+                                                                                                            url: img,
+                                                                                                            type: 'image',
+                                                                                                            prompt: shot.prompt,
+                                                                                                            mjImages: outputImages,
+                                                                                                            selectedMjImageIndex: idx,
+                                                                                                            storyboardContext: { nodeId: node.id, shotId: shot.id, shotIndex: (node.settings?.shots || []).findIndex(s => s.id === shot.id), allShots: node.settings?.shots || [] }
+                                                                                                        });
+                                                                                                    }}
                                                                                                     onContextMenu={(e) => {
                                                                                                         // V3.7.29: 缩略图右键预览
                                                                                                         handlePreviewRightClick(e, {
@@ -30041,6 +31175,23 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                                 >
                                                                                                     <LazyBase64Image src={img} className="w-full h-full object-cover" />
                                                                                                     <div className="absolute top-0 left-0 bg-black/50 text-white text-[7px] px-0.5">{idx + 1}</div>
+                                                                                                    <button
+                                                                                                        onClick={(e) => {
+                                                                                                            e.stopPropagation();
+                                                                                                            setLightboxItem({
+                                                                                                                url: img,
+                                                                                                                type: 'image',
+                                                                                                                prompt: shot.prompt,
+                                                                                                                mjImages: outputImages,
+                                                                                                                selectedMjImageIndex: idx,
+                                                                                                                storyboardContext: { nodeId: node.id, shotId: shot.id, shotIndex: (node.settings?.shots || []).findIndex(s => s.id === shot.id), allShots: node.settings?.shots || [] }
+                                                                                                            });
+                                                                                                        }}
+                                                                                                        className="absolute bottom-0 left-0 p-0.5 rounded-tr bg-black/60 text-white hover:bg-blue-500 opacity-0 group-hover/thumb:opacity-100 transition-opacity z-10"
+                                                                                                        title={t('预览原图')}
+                                                                                                    >
+                                                                                                        <Maximize2 size={8} />
+                                                                                                    </button>
                                                                                                 </div>
                                                                                             ))}
                                                                                         </div>
@@ -30121,18 +31272,39 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                         }
 
                                                                         // 单图或无图 - 显示单个缩略图
-                                                                        const singleUrl = outputImages[0] || shot.output_url;
+                                                                        const singleUrl = outputImages[0] || activeHistorySnapshot?.output_url || shot.output_url;
+                                                                        const singleHasSelection = selectedIndex === 0;
                                                                         return (
                                                                             <div
-                                                                                className={`flex-1 min-h-[80px] rounded overflow-hidden relative group/preview cursor-pointer border ${theme === 'dark'
-                                                                                    ? 'border-zinc-800 bg-black'
+                                                                                className={`flex-1 min-h-[80px] rounded overflow-hidden relative group/preview border ${singleHasSelection
+                                                                                    ? 'border-blue-500 ring-1 ring-blue-500/50'
+                                                                                    : (theme === 'dark'
+                                                                                        ? 'border-zinc-800'
+                                                                                        : theme === 'solarized'
+                                                                                            ? 'border-[#eee8d5]'
+                                                                                            : 'border-zinc-200')
+                                                                                    } ${theme === 'dark'
+                                                                                    ? 'bg-black'
                                                                                     : theme === 'solarized'
-                                                                                        ? `border-[#eee8d5] ${getPreviewBgClass(0)}`
-                                                                                        : 'border-zinc-200 bg-zinc-50'
-                                                                                    }`}
+                                                                                        ? `${getPreviewBgClass(0)}`
+                                                                                        : 'bg-zinc-50'
+                                                                                    } ${isLocked ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'}`}
                                                                                 onClick={(e) => {
                                                                                     e.stopPropagation();
-                                                                                    if (singleUrl) setLightboxItem({ url: singleUrl, type: 'image', prompt: shot.prompt });
+                                                                                    if (!singleUrl || isLocked) return;
+                                                                                    updateShot(node.id, shot.id, { selectedImageIndex: singleHasSelection ? -1 : 0 });
+                                                                                }}
+                                                                                onDoubleClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    if (!singleUrl) return;
+                                                                                    setLightboxItem({
+                                                                                        url: singleUrl,
+                                                                                        type: 'image',
+                                                                                        prompt: shot.prompt,
+                                                                                        mjImages: [singleUrl],
+                                                                                        selectedMjImageIndex: 0,
+                                                                                        storyboardContext: { nodeId: node.id, shotId: shot.id, shotIndex: (node.settings?.shots || []).findIndex(s => s.id === shot.id), allShots: node.settings?.shots || [] }
+                                                                                    });
                                                                                 }}
                                                                                 onContextMenu={(e) => {
                                                                                     // V3.7.29: 右键菜单支持
@@ -30140,6 +31312,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                         url: singleUrl,
                                                                                         type: 'image',
                                                                                         prompt: shot.prompt,
+                                                                                        mjImages: [singleUrl],
+                                                                                        selectedMjImageIndex: 0,
                                                                                         sourceNode: node
                                                                                     });
                                                                                 }}
@@ -30155,6 +31329,31 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/preview:opacity-100 flex items-center justify-center transition-opacity">
                                                                                         <Maximize2 size={16} className="text-white drop-shadow-md" />
                                                                                     </div>
+                                                                                )}
+                                                                                {singleUrl && (
+                                                                                    <div className={`absolute top-0 left-0 text-[8px] px-1 py-0.5 rounded-br ${singleHasSelection ? 'bg-blue-500 text-white' : 'bg-black/50 text-white'}`}>1</div>
+                                                                                )}
+                                                                                {singleHasSelection && (
+                                                                                    <div className="absolute top-0 right-0 bg-blue-500 text-white p-0.5 rounded-bl"><Check size={8} /></div>
+                                                                                )}
+                                                                                {singleUrl && (
+                                                                                    <button
+                                                                                        onClick={(e) => {
+                                                                                            e.stopPropagation();
+                                                                                            setLightboxItem({
+                                                                                                url: singleUrl,
+                                                                                                type: 'image',
+                                                                                                prompt: shot.prompt,
+                                                                                                mjImages: [singleUrl],
+                                                                                                selectedMjImageIndex: 0,
+                                                                                                storyboardContext: { nodeId: node.id, shotId: shot.id, shotIndex: (node.settings?.shots || []).findIndex(s => s.id === shot.id), allShots: node.settings?.shots || [] }
+                                                                                            });
+                                                                                        }}
+                                                                                        className="absolute bottom-0 left-0 p-0.5 rounded-tr bg-black/60 text-white hover:bg-blue-500 opacity-0 group-hover/preview:opacity-100 transition-opacity z-10"
+                                                                                        title={t('预览原图')}
+                                                                                    >
+                                                                                        <Maximize2 size={8} />
+                                                                                    </button>
                                                                                 )}
                                                                                 {/* V3.7.10: 图片文件名 */}
                                                                                 {shot.image_filename && (
@@ -31484,7 +32683,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                 </div>
             </div >
         );
-    }, [selectedNodeId, selectedNodeIds, hoverTargetId, nodeConnectedStatus, adjacentNodesCache, apiConfigsMap, getConnectedInputImages, theme, view, dragNodeId, connectingSource, connectingTarget, connectingInputType, deleteNode, handleNodeMouseUp, screenToWorld, setDragNodeId, setSelectedNodeId, setSelectedNodeIds, setActiveDropdown, setHoverTargetId, setConnectingSource, setConnectingTarget, setConnectingInputType, setResizingNodeId, setLightboxItem, isVideoUrl, updateNodeSettings, getConnectedTextNodes, startGeneration, getDefaultDurationForModel, getDefaultDurationsForModel, getConnectedGenNodes, getConnectedVideoInputNode, getConnectedVideoAnalyzeNode, handleCanvasDragOver, handleGenNodeDrop, importStoryboardMarkdownTable, importStoryboardTableFromFile, mutateStoryboardTable, normalizeStoryboardTableData, openStoryboardTableCellEditor, runStoryboardTablePromptMerge, markInteraction]);
+    }, [selectedNodeId, selectedNodeIds, hoverTargetId, nodeConnectedStatus, adjacentNodesCache, apiConfigsMap, getConnectedInputImages, theme, view, dragNodeId, connectingSource, connectingTarget, connectingInputType, deleteNode, handleNodeMouseUp, screenToWorld, setDragNodeId, setSelectedNodeId, setSelectedNodeIds, setActiveDropdown, setHoverTargetId, setConnectingSource, setConnectingTarget, setConnectingInputType, setResizingNodeId, setLightboxItem, isVideoUrl, updateNodeSettings, getConnectedTextNodes, startGeneration, getDefaultDurationForModel, getDefaultDurationsForModel, getConnectedGenNodes, getConnectedVideoInputNode, getConnectedVideoAnalyzeNode, handleCanvasDragOver, handleGenNodeDrop, importStoryboardMarkdownTable, importStoryboardTableFromFile, mutateStoryboardTable, normalizeStoryboardTableData, openStoryboardTableCellEditor, runStoryboardTablePromptMerge, markInteraction, resolveNodeRenderZIndex, touchNodeSelectionPriority]);
 
     // 高性能模式：当节点数量超过 50 或手动开启时启用
     const isPerfMode = nodes.length > 50 || globalPerformanceMode !== 'off';
@@ -35624,6 +36823,20 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                     >
                                                                         <option value={IMAGE_BATCH_MODE_PARALLEL_AGGREGATE}>{t('并发聚合')}</option>
                                                                         <option value={IMAGE_BATCH_MODE_STANDARD_BATCH}>{t('标准批次')}</option>
+                                                                    </select>
+                                                                    <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('原生多图')}</span>
+                                                                    <select
+                                                                        value={normalizeNativeMultiImageMode(entry.nativeMultiImageMode)}
+                                                                        onChange={(e) => updateModelLibraryEntry(entry.id, { nativeMultiImageMode: normalizeNativeMultiImageMode(e.target.value) })}
+                                                                        disabled={!isEditing}
+                                                                        className={`w-[116px] text-[9px] rounded px-1 py-0.5 border outline-none ${theme === 'dark'
+                                                                            ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                                                                            : 'bg-white border-zinc-300 text-zinc-900'
+                                                                            }`}
+                                                                    >
+                                                                        <option value={IMAGE_NATIVE_MULTI_IMAGE_MODE_AUTO}>{t('自动检测')}</option>
+                                                                        <option value={IMAGE_NATIVE_MULTI_IMAGE_MODE_FORCE}>{t('强制原生')}</option>
+                                                                        <option value={IMAGE_NATIVE_MULTI_IMAGE_MODE_DISABLE}>{t('禁用原生')}</option>
                                                                     </select>
                                                                     <span className={`text-[9px] ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('默认张数')}</span>
                                                                     <select
